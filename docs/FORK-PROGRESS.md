@@ -21,6 +21,9 @@ Upstream-Bezug: [KytyPS5/KytyPS5](https://github.com/KytyPS5/KytyPS5), Issues #5
 Build: siehe README (Windows). Konfiguration `-DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64`, Build-Ordner `_Build/windows`.
 Logs der Testläufe liegen lokal unter `_Build/logs/runN/` (nicht im Repo).
 
+**Startoptionen für Demon's Souls:** `--redzone` ist Pflicht (siehe Meilenstein 9); für Diagnose `--printf-direction File`,
+bei Shader-Problemen zusätzlich `--shader-log-direction File`.
+
 ## Stand
 
 | Bereich | Status |
@@ -100,6 +103,22 @@ Shader-Zähler beim letzten Lauf: VS 26 / PS 53 / CS 133.
 - `--graphics-debug-dump True` erzeugt Multi-GB-Logs (CP-Paket-Trace). Für normale Läufe weglassen;
   `--shader-log-direction File` reicht für Shader-Listings (landen inline im printf-Log).
 - Vulkan-Pipeline-Cache ist bei „dirty“ Builds abgeschaltet.
+
+### 2026-09-17 – Charakter-Editor durchlaufen, Welt lädt
+
+8. **Müll-Deskriptoren aus Tabellen-Probes** (`ResourceMaterialization.cpp`): Die Material-Probe liest Offset 4
+   jedes Records; Records anderen Typs liefern Keys, die im Heap auf Fremddaten zeigen, und 32 zufällige Bytes
+   bestehen den Typ-/Format-Check (`ValidImageDescriptor`) oft genug. Sichtbar als „T#“ mit 2186 Layern am Anfang des
+   Direct-Memory, Base-Array 560–6664 auf 64-Layer-Texturen, gefolgt von Texture-Cache-Alias-Konflikten und
+   ungültigen Image-Views. → `PlausibleImageDescriptor`: Depth < 2048, Base-Array ≤ Depth, bei Tabellen-Kandidaten
+   zusätzlich Base-Level ≤ Last-Level; Verstöße werden Null-Kandidaten. Dazu Null-Fallbacks im Texture-Cache
+   (`c96f597`) und für nicht sampelbare Formate (`k16UScaled`, `ab1a305`). Commits `c96f597`, `d171b7b`, `ab1a305`.
+9. **Red Zone** (Lauf 14): Guest-Fault auf `BPE JobWorkerThread`: `mov rax,[rsp-0x10]; mov [rax+0x18],ebp` mit
+   `rax = 0` – das Spiel liest einen Zeiger aus der SysV-Red-Zone (128 Byte unter `rsp`). Windows liefert
+   Exceptions (hier: Page-Protection-Faults der Speicherüberwachung) auf dem Stack des faultenden Threads aus und
+   überschreibt genau diesen Bereich. Dieselbe Klasse wie upstream #614 (Linux, `address=0xa8`).
+   → Kein Code-Fix nötig: Startoption `--redzone` (Loader leitet faultfähige Zugriffe auf stackwechselnde
+   Trampoline um). Ab jetzt Pflicht für diesen Titel.
 
 ## Offene Probleme
 
