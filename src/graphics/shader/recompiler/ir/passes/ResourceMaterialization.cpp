@@ -41,7 +41,8 @@ bool SpecializationFail(std::string_view message) {
 }
 
 Decoder::ImageDimension DescriptorDimension(const DescriptorValue&  descriptor,
-                                            Decoder::ImageDimension requested) {
+                                            Decoder::ImageDimension requested,
+                                            bool                    sampled = false) {
 	const bool is_array = requested == Decoder::ImageDimension::Dim1DArray ||
 	                      requested == Decoder::ImageDimension::Dim2DArray ||
 	                      requested == Decoder::ImageDimension::Dim2DMsaaArray;
@@ -67,8 +68,9 @@ Decoder::ImageDimension DescriptorDimension(const DescriptorValue&  descriptor,
 		case Prospero::ImageType::kColor2D:
 			// A plain 2D texture sampled with array coordinates is a one-layer array; the layer
 			// clamps to zero on hardware and in a one-layer Vulkan view alike. Keeping the
-			// requested dimension lets it share a table with real arrays.
-			if (requested == Decoder::ImageDimension::Dim2DArray) {
+			// requested dimension lets it share a table with real arrays. Storage views must
+			// keep the descriptor's own type.
+			if (sampled && requested == Decoder::ImageDimension::Dim2DArray) {
 				return Decoder::ImageDimension::Dim2DArray;
 			}
 			return Decoder::ImageDimension::Dim2D;
@@ -584,7 +586,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 			image.cube          = false;
 			continue;
 		}
-		const auto descriptor_dimension = DescriptorDimension(descriptor, base.dimension);
+		const auto descriptor_dimension = DescriptorDimension(
+		    descriptor, base.dimension, base.resource_class == ImageResourceClass::Sampled);
 		if (descriptor_dimension == Decoder::ImageDimension::Unknown) {
 			return SpecializationFail(fmt::format(
 			    "image descriptor {} has unsupported type {}: {:08x},{:08x},{:08x},{:08x},"
