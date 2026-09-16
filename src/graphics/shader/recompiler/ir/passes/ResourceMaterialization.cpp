@@ -227,6 +227,16 @@ bool MaterializeIndexedImage(const DescriptorSource::IndirectImage& indirect,
 		if (!readable || NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128)) {
 			candidate.dwords.fill(0);
 		}
+		static std::atomic<uint32_t> entry_log_count {0};
+		if (candidate.dwords[0] != 0u && entry_log_count.fetch_add(1) < 256u) {
+			std::fprintf(stderr,
+			             "indexed image table: base=0x%016llx offset=%u entry=%u dwords=%08x %08x "
+			             "%08x %08x %08x %08x %08x %08x\n",
+			             static_cast<unsigned long long>(base), indirect.selector_offset, key,
+			             candidate.dwords[0], candidate.dwords[1], candidate.dwords[2],
+			             candidate.dwords[3], candidate.dwords[4], candidate.dwords[5],
+			             candidate.dwords[6], candidate.dwords[7]);
+		}
 		next.keys.push_back(key);
 		const auto found = std::ranges::find(next.descriptors, candidate);
 		if (found == next.descriptors.end()) {
