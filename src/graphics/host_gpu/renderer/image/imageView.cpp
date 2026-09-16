@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 
@@ -339,6 +340,17 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	const auto view_layers  = slice_view && levels_valid
 	                              ? std::max(image.extent.depth >> normalized.base_level, 1u)
 	                              : image.layers;
+	// A descriptor can declare more array slices than the cached image holds (Demon's Souls
+	// binds 273 slices of a 256-layer array); clamp the view to the slices that exist.
+	if (levels_valid && normalized.layer_count != 0 && normalized.base_layer < view_layers &&
+	    normalized.layer_count > view_layers - normalized.base_layer) {
+		static std::atomic<uint32_t> layer_clamp_log_count {0};
+		if (layer_clamp_log_count.fetch_add(1) < 16u) {
+			LOGF("image view layers %u+%u clamped to %u image layers\n", normalized.base_layer,
+			     normalized.layer_count, view_layers);
+		}
+		normalized.layer_count = view_layers - normalized.base_layer;
+	}
 	const bool ranges_valid = levels_valid && normalized.layer_count != 0 &&
 	                          normalized.base_layer < view_layers &&
 	                          normalized.layer_count <= view_layers - normalized.base_layer;
