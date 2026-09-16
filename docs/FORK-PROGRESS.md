@@ -32,8 +32,8 @@ bei Shader-Problemen zusätzlich `--shader-log-direction File`.
 | Intro-/Logo-Videos (Bink) | ✅ mit Ton |
 | Hauptmenü | ✅ bedienbar, **kein Ton** |
 | Neues Spiel → Charakter-Editor | ✅ vollständig durchlaufen (Texturen größtenteils schwarz) |
-| Charakter-Editor → Spielwelt | ✅ **Spielwelt erreicht** (Lauf 15, mit `--redzone`): Nebel sichtbar, danach Tracker-Abbruch in einem Vertex-Shader (Fix `2a3e748`) |
-| Performance | ~2 fps beim ersten Weltframe (Shader-Kompilierung, Debug-Build ohne Pipeline-Cache) – noch nicht aussagekräftig |
+| Charakter-Editor → Spielwelt | ✅ **Im Spiel** (Lauf 19, 293 s, VS 184 / PS 292 / CS 717): HUD vollständig (Balken, Item-Slots mit Icons), Gebietsname „Außenposten-Durchgang“; 3D-Welt schwarz/rot (Null-Fallbacks der Material-Tabellen) |
+| Performance | 1–2 fps in der Welt – Shader-Kompilierung, kein Pipeline-Cache, CPU-seitige Tabellen-Materialisierung pro Dispatch; noch nicht aussagekräftig |
 
 ## Meilensteine
 
@@ -139,6 +139,17 @@ Shader-Zähler beim letzten Lauf: VS 26 / PS 53 / CS 133.
     dem Speicher geladen, statisch nicht beschränkbar (Fall aus #507). → Da die Form (8 Adress-Loads, Stride 32)
     die Tabelle bereits identifiziert, bekommt ein unbeschränkter Index dasselbe 32-Einträge-Budget wie eine
     Schleife ohne sichtbare Grenze (Log mit Index-Ausdruck). Commit `2ee0ab1`.
+14. **View-Layer jenseits des Bildes** (`imageView.cpp`, Host, Lauf 19 nach 293 s im Spiel): 2D-Array-View
+    `80+193` auf einem 256-Layer-Bild – der Deskriptor deklariert mehr Slices, als das gecachte Bild hat.
+    → Layer-Anzahl auf die vorhandenen Slices clampen, Log. Commit `cf02bfa`.
+
+**Ergebnis 2026-09-17.** Vom Charakter-Editor bis **ins Spiel**: HUD, Item-Slots, Gebietsname rendern korrekt;
+die 3D-Welt ist schwarz/rot, weil die Material-Tabellen größtenteils Null-Images liefern. Lauf 19 lief 293 s in der
+Welt mit VS 184 / PS 292 / CS 717 Shadern. Fallback-Häufigkeiten in Lauf 19: Material-Tabellen-Nulls 32
+(pc `0xfc`: 24, pc `0x1470`: 8), Mip-Clamps 16, Depth-Feedback 16, nicht sampelbare Formate 4
+(`0x3a2eb41bacc0239f`: Formate 17, 39; `0xc509ed46b415549b`: Formate 16, 84), unbeschränkte Tabellenindizes 3.
+
+**Phase 1 (Booten bis ins Spiel) ist damit abgeschlossen. Phase 2 (korrekt rendern) beginnt.**
 
 ## Offene Probleme
 
