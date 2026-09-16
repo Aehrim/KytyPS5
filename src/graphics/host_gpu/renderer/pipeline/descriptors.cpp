@@ -1024,7 +1024,17 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					    layout == vk::ImageLayout::eDepthAttachmentStencilReadOnlyOptimal;
 					if ((aspect & vk::ImageAspectFlagBits::eDepth && !depth_read) ||
 					    (aspect & vk::ImageAspectFlagBits::eStencil && !stencil_read)) {
-						EXIT("sampling a writable depth/stencil attachment aspect\n");
+						// Demon's Souls samples its depth buffer from non-pixel stages while it
+						// stays bound writable (fog/particle passes). Keep the draw and let the
+						// driver resolve the feedback; log it so the pass can be identified.
+						static std::atomic<uint32_t> feedback_log_count {0};
+						if (feedback_log_count.fetch_add(1) < 16u) {
+							LOGF("sampling a writable depth/stencil attachment aspect: stage=%u "
+							     "layout=%u aspect=0x%x image=%u\n",
+							     static_cast<uint32_t>(program.stage),
+							     static_cast<uint32_t>(layout),
+							     static_cast<vk::ImageAspectFlags::MaskType>(aspect), i);
+						}
 					}
 				}
 				image.Transit(layout,
