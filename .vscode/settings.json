@@ -1,11 +1,12 @@
-﻿{
+{
     "cmake.sourceDirectory": "${workspaceFolder}",
-    "cmake.buildDirectory": "${workspaceFolder}/_Build/vscode-clang",
+    "cmake.buildDirectory": "${workspaceFolder}/_Build/windows",
     "cmake.generator": "Ninja",
     "cmake.environment": {
         "CC": "clang-cl",
         "CXX": "clang-cl",
-        "PATH": "${env:ProgramFiles}/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin;${env:ProgramFiles}/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja;${env:PATH}"
+        "VULKAN_SDK": "C:/VulkanSDK/1.4.357.0",
+        "PATH": "${env:ProgramFiles(x86)}/Microsoft Visual Studio/2022/BuildTools/VC/Tools/Llvm/x64/bin;${env:ProgramFiles}/CMake/bin;${env:LOCALAPPDATA}/Microsoft/WinGet/Packages/Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe;C:/VulkanSDK/1.4.357.0/Bin;${env:PATH}"
     },
     "cmake.configureSettings": {
         "CMAKE_C_COMPILER": "clang-cl",
@@ -13,4 +14,3 @@
         "CMAKE_PREFIX_PATH": "C:/Qt/6.8.3/msvc2022_64"
     }
 }
-
