@@ -151,6 +151,20 @@ Welt mit VS 184 / PS 292 / CS 717 Shadern. Fallback-Häufigkeiten in Lauf 19: Ma
 
 **Phase 1 (Booten bis ins Spiel) ist damit abgeschlossen. Phase 2 (korrekt rendern) beginnt.**
 
+### 2026-09-17 – Phase 2: korrekt rendern
+
+15. **2D-Texturen in 2D-Array-Tabellen** (`ResourceMaterialization.cpp`): Die Licht-Tabelle bei pc `0xfc` nullte
+    24× pro Lauf Einträge, weil normale 2D-Shadowmaps neben 2D-Array-Shadowmaps liegen und der Shader alle mit
+    `2d_array`-Koordinaten sampelt; `DescriptorDimension` mappte `kColor2D` stur auf `Dim2D` → Form-Konflikt → Null.
+    Eine 2D-Textur mit Array-Koordinaten ist auf der Hardware ein 1-Layer-Array (Layer clampt auf 0), Vulkan erlaubt
+    eine 2DArray-View auf ein 2D-Bild. → Bei angefragtem `Dim2DArray` bleibt es `Dim2DArray`. Echter Fix, kein
+    Fallback. Commit `f5efe1a`. Nicht anwendbar auf Cubemap-Tabellen (pc `0x1470`): `cube` ändert die
+    Koordinatenberechnung im Code; der dortige 2D-Kandidat ist ein 1×4-Platzhalter, Null ist korrekt.
+16. **View-Layer-Clamp** (`imageView.cpp`, Commit `cf02bfa`), siehe 14.
+
+**Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
+ohne Verdrängung; für längere Sessions relevant.
+
 ## Offene Probleme
 
 | # | Problem | Stand |
