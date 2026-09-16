@@ -107,7 +107,7 @@ Shader-Zähler beim letzten Lauf: VS 26 / PS 53 / CS 133.
 |---|---|---|
 | 1 | Base-Array-Clamp (`54049c6`) im Spiel verifizieren; Herkunft der Deskriptoren mit `BASE_ARRAY` ≥ Layer klären | Lauf 11 |
 | 2 | Kein Ton ab Hauptmenü (Logo-Video hat Ton; SDL-Gerät offen; ATRAC9 dekodiert) | nicht untersucht – vermutlich anderer Ausgabepfad des Spiel-Mixers (`cp11_groupmix`) |
-| 3 | Null-Fallback bei inkompatiblen Kandidaten kann sichtbar werden (schwarze Reflexion o. ä.) | akzeptiert, beobachten |
+| 3 | **Texturen im Charakter-Editor größtenteils schwarz** (nur einige Rüstungsteile korrekt). Sichtbare Folge der Null-Fallbacks: Material-Tabelle pc `0xfc` nullt denselben Kandidaten 25×, Indexed-Tables nullen Fremdeinträge, Texture-Cache bindet Null bei Alias-Konflikten. Nächste große Baustelle nach dem Spielstart. | beobachtet in Lauf 11 |
 | 4 | Linux: Crash im Runtime-Linker (upstream #614) | nicht relevant für uns, Windows primär |
 
 ## Geplante Themen
