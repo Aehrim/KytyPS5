@@ -205,9 +205,28 @@ private:
 		std::abort();
 	}
 
-	Value LowerDescriptorPhi(Value value) {
+	Value LowerDescriptorPhi(Value value, uint32_t depth = 0) {
 		value           = value.Resolve();
 		const auto* phi = value.TryInstruction();
+		// A merge arm that never wrote the descriptor register carries the SGPR reset value.
+		// Structurized early exits (exec = 0) flow through such merges, and no lane reaches the
+		// memory operation along them, so the written arm is the descriptor.
+		if (depth < 8u && phi != nullptr && phi->GetOpcode() == ValueOpcode::Phi &&
+		    phi->GetType() == Type::U32) {
+			Value written;
+			bool  unique = true;
+			for (size_t arm = 0; arm < phi->NumArgs() && unique; arm++) {
+				const auto arg = phi->Arg(arm).Resolve();
+				if (arg.IsImmediate() && arg.GetType() == Type::U32 && arg.U32() == 0u) {
+					continue;
+				}
+				unique  = written.IsEmpty() || written == arg;
+				written = arg;
+			}
+			if (unique && !written.IsEmpty() && !(written == value)) {
+				return LowerDescriptorPhi(written, depth + 1u);
+			}
+		}
 		if (m_shader_writes || phi == nullptr || phi->GetOpcode() != ValueOpcode::Phi ||
 		    phi->NumArgs() != 2u || phi->NumPhiBlocks() != 2u || phi->GetType() != Type::U32 ||
 		    m_program.blocks.size() != m_program.block_info.size()) {

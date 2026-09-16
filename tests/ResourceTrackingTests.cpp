@@ -1222,6 +1222,39 @@ void TestPhiValidation() {
         "control-dependent descriptor phi was not rejected transactionally");
 }
 
+void TestUnwrittenDescriptorPhiArm() {
+  Fixture fixture;
+  auto *entry = fixture.block;
+  auto *left = fixture.AddBlock();
+  auto *right = fixture.AddBlock();
+  auto *merge = fixture.AddBlock();
+  entry->AddBranch(left);
+  entry->AddBranch(right);
+  left->AddBranch(merge);
+  right->AddBranch(merge);
+  const auto loaded = fixture.UserData(3);
+  auto &phi = merge->AppendNewInst(ValueOpcode::Phi, {},
+                                   static_cast<uint64_t>(Type::U32));
+  phi.AddPhiOperand(left, Value(0u));
+  phi.AddPhiOperand(right, loaded);
+  const auto handle = fixture.Emit(ValueOpcode::GetBufferResource,
+                                   {Value(&phi), Value(0u), Value(64u), Value(0u)},
+                                   MemoryFlags{0, 20}, merge);
+  MemoryInfo memory;
+  memory.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::LoadBufferU32,
+               {handle, Value(0u), Value(0u), Value(0u), Value(true)},
+               fixture.AddMemory(memory, 20), merge);
+
+  fixture.PlanAndTrack();
+  Check(fixture.program.info.buffers.size() == 1 &&
+            fixture.program.descriptor_sources.size() == 1 &&
+            EquivalentValue(fixture.program,
+                            fixture.program.descriptor_sources[0].dwords[0],
+                            loaded),
+        "unwritten descriptor phi arm was not skipped");
+}
+
 ResourcePlan ConditionalSamplerPlan(bool diamond, bool reverse, bool reverse_phi,
                                     bool nonuniform = false,
                                     bool writable = false) {
@@ -2029,6 +2062,7 @@ int main() {
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("phi validation", TestPhiValidation);
+    Run("unwritten descriptor phi arm", TestUnwrittenDescriptorPhiArm);
     Run("conditional sampler phi", TestConditionalSamplerPhi);
     Run("runtime-rooted loop", TestLoopCycleEnteredThroughRuntimeValue);
     Run("invariant loop phi", TestInvariantLoopPhi);
