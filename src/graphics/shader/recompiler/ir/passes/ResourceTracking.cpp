@@ -392,7 +392,7 @@ private:
 	}
 
 	// Upper bound on the values a table index expression can take.
-	static bool BoundedIndexCount(Value value, uint32_t& count) {
+	bool BoundedIndexCount(Value value, uint32_t& count) const {
 		const auto* inst = value.Resolve().TryInstruction();
 		if (inst == nullptr) {
 			return false;
@@ -413,8 +413,64 @@ private:
 					return true;
 				}
 				return false;
+			case ValueOpcode::Phi: return LoopCounterBound(*inst, count);
 			default: return false;
 		}
+	}
+
+	static bool IsCounterOf(const Inst* operand, const Inst& phi) {
+		if (operand == &phi) {
+			return true;
+		}
+		return operand != nullptr && operand->GetOpcode() == ValueOpcode::IAdd32 &&
+		       operand->NumArgs() == 2u &&
+		       (operand->Arg(0).Resolve().TryInstruction() == &phi ||
+		        operand->Arg(1).Resolve().TryInstruction() == &phi);
+	}
+
+	// A loop counter Phi [start, entry], [counter + step, latch] walks a table; the compare that
+	// leaves the loop bounds it. An unknown bound falls back to a fixed table budget, where
+	// entries past the real table become null candidates.
+	bool LoopCounterBound(const Inst& phi, uint32_t& count) const {
+		constexpr uint32_t DefaultLoopTableEntries = 32u;
+		if (phi.GetType() != Type::U32 || phi.NumArgs() != 2u) {
+			return false;
+		}
+		bool induction = false;
+		for (size_t arm = 0; arm < phi.NumArgs(); arm++) {
+			const auto arg = phi.Arg(arm).Resolve();
+			if (arg.IsImmediate()) {
+				continue;
+			}
+			const auto* add = arg.TryInstruction();
+			induction = induction || (add != nullptr && add->GetOpcode() == ValueOpcode::IAdd32 &&
+			                          add->NumArgs() == 2u);
+		}
+		if (!induction) {
+			return false;
+		}
+		for (const auto& info: m_program.block_info) {
+			const auto* compare = info.condition.Resolve().TryInstruction();
+			if (compare == nullptr || compare->NumArgs() != 2u) {
+				continue;
+			}
+			const auto op = compare->GetOpcode();
+			if (op != ValueOpcode::ULessThan32 && op != ValueOpcode::UGreaterThan32 &&
+			    op != ValueOpcode::INotEqual32 && op != ValueOpcode::IEqual32) {
+				continue;
+			}
+			for (size_t side = 0; side < 2u; side++) {
+				uint32_t bound = 0;
+				if (IsCounterOf(compare->Arg(side).Resolve().TryInstruction(), phi) &&
+				    ImmediateU32(compare->Arg(side ^ 1u), bound) && bound != 0u &&
+				    bound <= ShaderInfo::MaxImages) {
+					count = bound;
+					return true;
+				}
+			}
+		}
+		count = DefaultLoopTableEntries;
+		return true;
 	}
 
 	// Matches a T# read from a static table at address + offset + (index << 5) with a provably
