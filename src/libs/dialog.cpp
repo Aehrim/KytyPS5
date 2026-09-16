@@ -304,11 +304,21 @@ namespace SaveDataDialog {
 
 LIB_NAME("SaveDataDialog", "SaveDataDialog");
 
-constexpr int SAVE_STATUS_NONE        = 0;
-constexpr int SAVE_STATUS_INITIALIZED = 1;
-constexpr int SAVE_STATUS_FINISHED    = 3;
-constexpr int SAVE_RESULT_OK          = 0;
-constexpr int SAVE_BUTTON_ID_OK       = 1;
+constexpr int SAVE_STATUS_NONE          = 0;
+constexpr int SAVE_STATUS_INITIALIZED   = 1;
+constexpr int SAVE_STATUS_RUNNING       = 2;
+constexpr int SAVE_STATUS_FINISHED      = 3;
+constexpr int SAVE_RESULT_OK            = 0;
+constexpr int SAVE_BUTTON_ID_OK         = 1;
+constexpr int SAVE_MODE_SYSTEM_MSG      = 3;
+constexpr int SAVE_SYSMSG_TYPE_PROGRESS = 5;
+
+struct SaveDataDialogSystemMessageParam {
+	int32_t  sys_msg_type;
+	uint32_t pad0;
+	uint64_t value;
+	uint8_t  reserved[32];
+};
 
 struct SaveDataDialogParam {
 	uint8_t  base_param[48];
@@ -400,24 +410,36 @@ int KYTY_SYSV_ABI SaveDataDialogGetResult(void* result) {
 int KYTY_SYSV_ABI SaveDataDialogOpen(const void* param) {
 	PRINT_NAME();
 
-	const auto* p = static_cast<const SaveDataDialogParam*>(param);
+	const auto* p        = static_cast<const SaveDataDialogParam*>(param);
+	bool        progress = false;
 	if (p != nullptr) {
 		g_save_mode        = p->mode;
 		g_save_user_data   = p->user_data;
 		g_save_dir_name[0] = '\0';
-		LOGF("\t size           = %d\n"
-		     "\t mode           = %d\n"
-		     "\t disp_type      = %d\n"
-		     "\t items          = 0x%016" PRIx64 "\n"
-		     "\t user_msg_param = 0x%016" PRIx64 "\n"
-		     "\t sys_msg_param  = 0x%016" PRIx64 "\n"
-		     "\t prog_bar_param = 0x%016" PRIx64 "\n"
-		     "\t user_data      = 0x%016" PRIx64 "\n",
-		     p->size, p->mode, p->disp_type, reinterpret_cast<uint64_t>(p->items),
-		     reinterpret_cast<uint64_t>(p->user_msg_param),
-		     reinterpret_cast<uint64_t>(p->sys_msg_param),
-		     reinterpret_cast<uint64_t>(p->prog_bar_param),
-		     reinterpret_cast<uint64_t>(p->user_data));
+		const auto* sys_msg =
+		    static_cast<const SaveDataDialogSystemMessageParam*>(p->sys_msg_param);
+		progress = p->mode == SAVE_MODE_SYSTEM_MSG && sys_msg != nullptr &&
+		           sys_msg->sys_msg_type == SAVE_SYSMSG_TYPE_PROGRESS;
+		// Games that keep a progress message open re-open it every frame if it reports
+		// finished; log only the first openings.
+		static int open_log_count = 0;
+		if (open_log_count++ < 32) {
+			LOGF("\t size           = %d\n"
+			     "\t mode           = %d\n"
+			     "\t disp_type      = %d\n"
+			     "\t sys_msg_type   = %d\n"
+			     "\t items          = 0x%016" PRIx64 "\n"
+			     "\t user_msg_param = 0x%016" PRIx64 "\n"
+			     "\t sys_msg_param  = 0x%016" PRIx64 "\n"
+			     "\t prog_bar_param = 0x%016" PRIx64 "\n"
+			     "\t user_data      = 0x%016" PRIx64 "\n",
+			     p->size, p->mode, p->disp_type, sys_msg != nullptr ? sys_msg->sys_msg_type : -1,
+			     reinterpret_cast<uint64_t>(p->items),
+			     reinterpret_cast<uint64_t>(p->user_msg_param),
+			     reinterpret_cast<uint64_t>(p->sys_msg_param),
+			     reinterpret_cast<uint64_t>(p->prog_bar_param),
+			     reinterpret_cast<uint64_t>(p->user_data));
+		}
 
 		const auto* items = static_cast<const SaveDataDialogItems*>(p->items);
 		if (items != nullptr && items->dir_names != nullptr) {
@@ -431,7 +453,8 @@ int KYTY_SYSV_ABI SaveDataDialogOpen(const void* param) {
 		}
 	}
 
-	g_save_status = SAVE_STATUS_FINISHED;
+	// A progress message has no button; the game closes it itself when the operation ends.
+	g_save_status = progress ? SAVE_STATUS_RUNNING : SAVE_STATUS_FINISHED;
 
 	return OK;
 }
@@ -647,10 +670,10 @@ struct ErrorDialogParam {
 static_assert(sizeof(ErrorDialogParam) == 16);
 
 static std::mutex g_error_mutex;
-static int        g_error_status     = STATUS_NONE;
-static uint64_t   g_error_generation = 0;
-static uint64_t   g_error_revision   = 0;
-static int32_t    g_error_code       = 0;
+static int        g_error_status             = STATUS_NONE;
+static uint64_t   g_error_generation         = 0;
+static uint64_t   g_error_revision           = 0;
+static int32_t    g_error_code               = 0;
 static void (*g_error_visibility_callback)() = nullptr;
 
 static void SetStatus(int status, std::unique_lock<std::mutex>& lock) {
