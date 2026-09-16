@@ -32,8 +32,8 @@ bei Shader-Problemen zusätzlich `--shader-log-direction File`.
 | Intro-/Logo-Videos (Bink) | ✅ mit Ton |
 | Hauptmenü | ✅ bedienbar, **kein Ton** |
 | Neues Spiel → Charakter-Editor | ✅ vollständig durchlaufen (Texturen größtenteils schwarz) |
-| Charakter-Editor → Spielwelt | 🔄 Laden der Welt beginnt; Abbrüche werden nacheinander in Null-Fallbacks mit Log umgewandelt |
-| Performance | – noch nicht bewertbar |
+| Charakter-Editor → Spielwelt | ✅ **Spielwelt erreicht** (Lauf 15, mit `--redzone`): Nebel sichtbar, danach Tracker-Abbruch in einem Vertex-Shader (Fix `2a3e748`) |
+| Performance | ~2 fps beim ersten Weltframe (Shader-Kompilierung, Debug-Build ohne Pipeline-Cache) – noch nicht aussagekräftig |
 
 ## Meilensteine
 
@@ -118,7 +118,12 @@ Shader-Zähler beim letzten Lauf: VS 26 / PS 53 / CS 133.
    Exceptions (hier: Page-Protection-Faults der Speicherüberwachung) auf dem Stack des faultenden Threads aus und
    überschreibt genau diesen Bereich. Dieselbe Klasse wie upstream #614 (Linux, `address=0xa8`).
    → Kein Code-Fix nötig: Startoption `--redzone` (Loader leitet faultfähige Zugriffe auf stackwechselnde
-   Trampoline um). Ab jetzt Pflicht für diesen Titel.
+   Trampoline um). Ab jetzt Pflicht für diesen Titel. **Ergebnis Lauf 15: Spielwelt erreicht** (Nebel, ~2 fps,
+   VS 47 / PS 81 / CS 333 nach 107 s).
+10. **Tabellen-Loop im Vertex-Shader** (`ResourceTracking.cpp`, `0x3b9e5a334aadc61c` pc `0x264`): T#-Tabelle bei
+    `SRT + 1712`, Index ist eine Schleifenvariable `Phi [0, entry], [i + 1, latch]`. → Induktions-Phi als Index
+    akzeptiert; Grenze aus der Schleifenbedingung (`i < n`, `i + 1 != n` mit Konstante), sonst Fallback 32 Einträge.
+    Commit `2a3e748`.
 
 ## Offene Probleme
 
