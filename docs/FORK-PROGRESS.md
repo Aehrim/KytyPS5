@@ -28,8 +28,8 @@ Logs der Testläufe liegen lokal unter `_Build/logs/runN/` (nicht im Repo).
 | Boot bis Hauptmenü | ✅ läuft (upstream: crasht) |
 | Intro-/Logo-Videos (Bink) | ✅ mit Ton |
 | Hauptmenü | ✅ bedienbar, **kein Ton** |
-| Neues Spiel → Charakter-Editor | ✅ erreicht |
-| Charakter-Editor → Spielwelt | ❌ Crash im Pixel-Shader (Sampler-Deskriptor), in Arbeit |
+| Neues Spiel → Charakter-Editor | ✅ erreicht, Name/Klasse sichtbar |
+| Charakter-Editor → Spielwelt | ❌ noch nicht erreicht; Host-Backend-Abbrüche werden nacheinander in Clamps mit Log umgewandelt |
 | Performance | – noch nicht bewertbar |
 
 ## Meilensteine
@@ -77,8 +77,22 @@ ausgegeben (`02bd07c`), damit die nächsten Fälle dieser Klasse ohne Debugger l
    → `LowerDescriptorPhi` überspringt Arme mit dem unbeschriebenen Wert 0 und nimmt den einzigen beschriebenen Arm.
    Regressionstest `unwritten descriptor phi arm`. Commit `8a023ba`.
 
-**Ergebnis.** Boot → Logos → Hauptmenü → Neues Spiel → Charakter-Editor. Shader-Zähler beim letzten Lauf:
-VS 23 / PS 46 / CS 115.
+5. **Gestreamte Mip-Ketten** (`descriptors.cpp`, Host): T# mit `LAST_LEVEL` > `MAX_MIP` (8192×128, Tile 27,
+   base=1 last=4 max=3) – die volle Mip-Kette ist deklariert, resident sind nur `MAX_MIP + 1` Level. Der Host brach
+   ab, wenn die zusätzlichen Level das Tiling-Layout ändern würden. → View auf die residenten Level clampen (Abbruch
+   nur noch, wenn `BASE_LEVEL` selbst außerhalb liegt). Commit `6414e01`.
+6. **Waterfall-Loop über Bitmaske** (`ResourceTracking.cpp` / `ResourceMaterialization.cpp`, Pixel-Shader
+   `0xc509ed46b415549b` pc `0xfc`): `T# = *(SRT + 344 + (s_ff1(mask) << 5))` – pro gesetztem Bit ein Deskriptor
+   aus einer statischen Tabelle. Der Index ist beweisbar beschränkt (0–31), die Adresse statisch.
+   → Neue „indexed“-Form des Indirect-Image-Plans (`IndirectImage::key_count`): Heap ist eine 2-Dword-Adresse,
+   Key = Index; die Materialisierung liest alle Tabelleneinträge, Mapping und Binary-Search im SPIR-V wie bisher.
+   Index-Bound erkannt für `FindILsb32` (32), `BitwiseAnd32`/`UMin32` mit Konstante (Maske + 1). Regressionstest
+   `indexed image table`. Commit `50ea6f7`.
+7. **Base-Array außerhalb der Layer** (`descriptors.cpp`, Host): T# mit `BASE_ARRAY` ≥ Layer-Anzahl → Abbruch.
+   → Clamp auf den letzten Layer, Deskriptor geloggt (gedeckelt). Commit `54049c6`.
+
+**Ergebnis.** Boot → Logos → Hauptmenü → Neues Spiel → Charakter-Editor bis zur Namens-/Klassenwahl.
+Shader-Zähler beim letzten Lauf: VS 26 / PS 53 / CS 133.
 
 **Beobachtungen.**
 - Das Spiel öffnet über `open()` nur ~35–42 Dateien (Configs, Videos, Menü-Sounds); Level-/Modelldaten laufen
@@ -91,7 +105,7 @@ VS 23 / PS 46 / CS 115.
 
 | # | Problem | Stand |
 |---|---|---|
-| 1 | Pixel-Shader `0x8205bcef6a135cee` pc `0x294`: `GetSamplerResource dword 0 is not a valid runtime value` | Fix `8a023ba`, Verifikation im Spiel ausstehend |
+| 1 | Base-Array-Clamp (`54049c6`) im Spiel verifizieren; Herkunft der Deskriptoren mit `BASE_ARRAY` ≥ Layer klären | Lauf 11 |
 | 2 | Kein Ton ab Hauptmenü (Logo-Video hat Ton; SDL-Gerät offen; ATRAC9 dekodiert) | nicht untersucht – vermutlich anderer Ausgabepfad des Spiel-Mixers (`cp11_groupmix`) |
 | 3 | Null-Fallback bei inkompatiblen Kandidaten kann sichtbar werden (schwarze Reflexion o. ä.) | akzeptiert, beobachten |
 | 4 | Linux: Crash im Runtime-Linker (upstream #614) | nicht relevant für uns, Windows primär |
