@@ -124,6 +124,21 @@ Shader-Zähler beim letzten Lauf: VS 26 / PS 53 / CS 133.
     `SRT + 1712`, Index ist eine Schleifenvariable `Phi [0, entry], [i + 1, latch]`. → Induktions-Phi als Index
     akzeptiert; Grenze aus der Schleifenbedingung (`i < n`, `i + 1 != n` mit Konstante), sonst Fallback 32 Einträge.
     Commit `2a3e748`.
+11. **Depth-Feedback** (`descriptors.cpp`, Host, Lauf 16 nach 166 s in der Welt, VS 159 / PS 261 / CS 491): Ein
+    Shader sampelt den Tiefenpuffer, während er als beschreibbares Attachment gebunden ist (Nebel-/Partikel-Pässe);
+    der Feedback-Loop-Pfad deckte nur Pixel-Shader ab. → Warnung (Stage/Layout/Aspect, gedeckelt) statt Abbruch;
+    der Treiber löst den Feedback auf. Commit `541d11f`. Bildqualität dieser Pässe offen.
+12. **Autosave-Dialog-Schleife** (`dialog.cpp`): `SaveDataDialogOpen` meldete jeden Dialog sofort als beendet. Das
+    Spiel hält den Fortschrittsdialog (`mode 3`, Sys-Message-Typ `PROGRESS`) offen und öffnet ihn bei „beendet“
+    jede Iteration neu – 2,5–6,5 Mio. Aufrufe pro Sitzung mit je neun Log-Zeilen; Lauf 17 blieb darin hängen
+    (weißes Hauptmenü, Glitches, „Freeze“ – kein Code-Unterschied zu Lauf 16/18, reines Timing).
+    → Fortschrittsdialog bleibt `RUNNING` bis `Close`; alle anderen Dialoge weiterhin Auto-OK; Dump nur für die
+    ersten 32 Aufrufe. Commit `c14ec62`.
+13. **Unbeschränkter Tabellenindex** (`ResourceTracking.cpp`, Compute `0x59775bb47ad2848a` pc `0x1a0c`, Lauf 18 nach
+    122 s, VS 160 / PS 259 / CS 587): Index = `ReadFirstLane(Select(…, LoadAddress[Global]))` – zur Laufzeit aus
+    dem Speicher geladen, statisch nicht beschränkbar (Fall aus #507). → Da die Form (8 Adress-Loads, Stride 32)
+    die Tabelle bereits identifiziert, bekommt ein unbeschränkter Index dasselbe 32-Einträge-Budget wie eine
+    Schleife ohne sichtbare Grenze (Log mit Index-Ausdruck). Commit `2ee0ab1`.
 
 ## Offene Probleme
 
