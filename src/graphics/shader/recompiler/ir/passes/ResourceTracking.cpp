@@ -5,6 +5,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cstdio>
 #include <fmt/format.h>
@@ -414,7 +415,20 @@ private:
 				}
 				return false;
 			case ValueOpcode::Phi: return LoopCounterBound(*inst, count);
-			default: return false;
+			default: {
+				// The caller has already matched a descriptor table walk; an index the tracker
+				// cannot bound (loaded from memory, selected per draw) gets the same fixed
+				// budget as a loop without a visible bound.
+				static std::atomic<uint32_t> unbounded_log_count {0};
+				if (unbounded_log_count.fetch_add(1) < 16u) {
+					std::fprintf(stderr,
+					             "shader resource tracking: hash=0x%016" PRIx64
+					             " image table index %s is unbounded, assuming 32 entries\n",
+					             m_program.shader_hash, DescribeValue(m_program, value).c_str());
+				}
+				count = 32u;
+				return true;
+			}
 		}
 	}
 
