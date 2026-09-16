@@ -28,8 +28,8 @@ Logs der Testläufe liegen lokal unter `_Build/logs/runN/` (nicht im Repo).
 | Boot bis Hauptmenü | ✅ läuft (upstream: crasht) |
 | Intro-/Logo-Videos (Bink) | ✅ mit Ton |
 | Hauptmenü | ✅ bedienbar, **kein Ton** |
-| Neues Spiel → Charakter-Editor | ✅ erreicht, Name/Klasse sichtbar |
-| Charakter-Editor → Spielwelt | ❌ noch nicht erreicht; Host-Backend-Abbrüche werden nacheinander in Clamps mit Log umgewandelt |
+| Neues Spiel → Charakter-Editor | ✅ vollständig durchlaufen (Texturen größtenteils schwarz) |
+| Charakter-Editor → Spielwelt | 🔄 Laden der Welt beginnt; Abbrüche werden nacheinander in Null-Fallbacks mit Log umgewandelt |
 | Performance | – noch nicht bewertbar |
 
 ## Meilensteine

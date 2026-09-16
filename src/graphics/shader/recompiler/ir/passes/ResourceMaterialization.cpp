@@ -625,9 +625,24 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 		} else if (image.numeric_class == Prospero::TextureNumericClass::Unsupported ||
 		           (base.depth_compare &&
 		            image.numeric_class != Prospero::TextureNumericClass::Float)) {
-			return SpecializationFail(
-			    fmt::format("sampled image descriptor {} uses unsupported format {}", i,
-			                static_cast<uint32_t>(format)));
+			// The host cannot sample this format yet (Demon's Souls binds k16UScaled textures
+			// when loading the world); bind a null image so the draw survives.
+			static std::atomic<uint32_t> format_log_count {0};
+			if (format_log_count.fetch_add(1) < 16u) {
+				std::fprintf(
+				    stderr,
+				    "shader resource specialization: hash=0x%016llx sampled image %u at pc "
+				    "0x%08x uses unsupported format %u, binding null\n",
+				    static_cast<unsigned long long>(program.shader_hash), i, base.first_use_pc,
+				    static_cast<uint32_t>(format));
+			}
+			next_snapshot.images[i].dwords.fill(0);
+			image.numeric_class     = Prospero::TextureNumericClass::Float;
+			image.dimension         = Decoder::ImageDimension::Dim2D;
+			image.cube              = false;
+			image.conversion_format = Prospero::BufferFormat::kInvalid;
+			image.shader_swizzle    = ShaderImageIdentitySwizzle;
+			image.fmask             = false;
 		}
 	}
 	for (uint32_t root_index = 0; root_index < next_specialization.images.size(); root_index++) {
