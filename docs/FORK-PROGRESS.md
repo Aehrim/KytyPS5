@@ -40,7 +40,7 @@ Auswertung headless: `qrenderdoc.exe --python <script.py>` mit dem `renderdoc`-M
 | Intro-/Logo-Videos (Bink) | ✅ mit Ton |
 | Hauptmenü | ✅ bedienbar, **kein Ton** |
 | Neues Spiel → Charakter-Editor | ✅ vollständig durchlaufen (Texturen größtenteils schwarz) |
-| Charakter-Editor → Spielwelt | ✅ **Im Spiel** (Lauf 19, 293 s, VS 184 / PS 292 / CS 717): HUD vollständig (Balken, Item-Slots mit Icons), Gebietsname „Außenposten-Durchgang“; 3D-Welt schwarz/rot (Null-Fallbacks der Material-Tabellen) |
+| Charakter-Editor → Spielwelt | ✅ **Im Spiel**, Kamera und Bewegung funktionieren; HUD korrekt; 3D-Welt-Farben = NaN aus dem Nebelvolumen (RenderDoc-Befund, Fix `90917f7` unverifiziert) |
 | Performance | 1–2 fps in der Welt – Shader-Kompilierung, kein Pipeline-Cache, CPU-seitige Tabellen-Materialisierung pro Dispatch; noch nicht aussagekräftig |
 
 ## Meilensteine
@@ -190,6 +190,16 @@ Normalen. Visibility-IDs plausibel. Nächster Schritt: RenderDoc-Pixel-Debugger 
 Instruktion finden. Werkzeuge: `rd_overview.py`, `rd_passes.py`, `rd_dump.py` (PNG-Dump), `rd_probe.py` (PickPixel),
 `rd_debug.py` (DebugPixel) im Scratchpad.
 
+18. **DX10-Clamp** (`spirvEmitterAlu.cpp`, aus der RenderDoc-Analyse): Der Pixel-Debugger zeigte, dass der
+    Lighting-Resolve (Draw 1449) sein NaN aus dem **Nebelvolumen** (3D-Textur 214×120×72) übernimmt; das Volumen wird von
+    Dispatch 1204 temporal integriert (liest das Volumen des Vorframes) – ein NaN bleibt darin für immer. Der
+    RDNA-`clamp`-Modifier macht im DX10-Clamp-Modus, in dem PS5-Shader laufen, **NaN zu 0**; der Emitter übersetzte ihn als
+    reines `FClamp(x, 0, 1)`, das NaN durchlässt. → `select(isnan(x), 0, clamp(x, 0, 1))`. Commit `90917f7`.
+    **Noch nicht verifiziert:** Lauf 25 (erster Lauf mit dem Fix) zeigte von Anfang an nur Schwarz (auch Logo-Video
+    und HUD), obwohl das Spiel bis ins Tutorial lief (310 s, VS 160 / PS 247 / CS 594, Tunnel-Ambience geladen).
+    Ob das der Fix oder die bekannte Video-/Textur-Flakiness (Problem 5) ist, klärt ein A/B-Lauf mit revertiertem
+    Commit – **erster Punkt der nächsten Sitzung.**
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
@@ -205,6 +215,9 @@ ohne Verdrängung; für längere Sessions relevant.
 | 6 | `k16UScaled`-Texturen werden als Null gebunden (`ab1a305`); Shader-seitige Konvertierung (als `R16_UINT` sampeln, `OpConvertUToF`) fehlt | offen |
 | 7 | Depth-Feedback-Pässe laufen ohne Layout-Übergang (`541d11f`); Bildqualität dieser Pässe (Nebel, Partikel) unklar | offen |
 | 8 | Indexed-Tables mit unbeschränktem Index nutzen ein festes 32-Einträge-Budget (`2ee0ab1`); Einträge jenseits der echten Tabelle werden genullt, Indizes ≥ 32 fallen auf Kandidat 0 zurück | akzeptiert, beobachten |
+| 9 | **Lauf 25 komplett schwarz** (Logo, Menü, HUD, Welt) trotz laufendem Spiel – erster Lauf mit dem DX10-Clamp-Fix `90917f7`. A/B-Test nötig: Fix revertieren → Bild wieder da? Falls ja, Emission prüfen (`OpFUnordNotEqual`/`OpSelect` sind syntaktisch wie im restlichen Emitter). Falls nein → Problem 5. | **nächste Sitzung zuerst** |
+| 10 | NaN-Ursprung im Nebel: selbst wenn der Clamp-Fix greift, ist die *erste* NaN-Quelle im Nebel-Integrator (Dispatch 1204, liest Vorframe-Volumen, Cluster-Gitter 27×15×9, 214×120 R16F, BC1 64×64) nicht identifiziert. Werkzeug: RenderDoc `DebugThread` auf diesen Dispatch (Frame-1-Event noch zu bestimmen; Pixel-Debug am layered Nebel-Draw 156142 liefert „no trace“). | offen |
+| 11 | Albedo-Texturen (BC1 2048², Material-Pass 174246) liefern an Mip 0 Nullen – bei gestreamten Texturen evtl. nur Mip 0 nicht resident; auf residentem Mip nachprüfen (`rd_probe.py` mit Mip 3–5). | offen |
 
 ## Geplante Themen
 
