@@ -25,7 +25,7 @@
             "request": "launch",
             "program": "${workspaceFolder}\\_Build\\windows\\kyty_emulator.exe",
             "args": [
-                "--game", "H:/gamesps5/PPSA01341",
+                "--game", "H:/gamesps5/PPSA01341/[DLPSGAME.COM]-PPSA01341-1.07/PPSA01341-app0",
                 "--printf-direction", "File",
                 "--graphics-debug-dump", "True"
             ],
