@@ -148,6 +148,10 @@ Shader-Zähler beim letzten Lauf: VS 26 / PS 53 / CS 133.
 | 2 | Kein Ton ab Hauptmenü (Logo-Video hat Ton; SDL-Gerät offen; ATRAC9 dekodiert) | nicht untersucht – vermutlich anderer Ausgabepfad des Spiel-Mixers (`cp11_groupmix`) |
 | 3 | **Texturen im Charakter-Editor größtenteils schwarz** (nur einige Rüstungsteile korrekt). Sichtbare Folge der Null-Fallbacks: Material-Tabelle pc `0xfc` nullt denselben Kandidaten 25×, Indexed-Tables nullen Fremdeinträge, Texture-Cache bindet Null bei Alias-Konflikten. Nächste große Baustelle nach dem Spielstart. | beobachtet in Lauf 11 |
 | 4 | Linux: Crash im Runtime-Linker (upstream #614) | nicht relevant für uns, Windows primär |
+| 5 | **Menü-Video mal weiß, mal schwarz, mal korrekt** (Läufe 17, 19 defekt; 15, 16, 18 korrekt, teils identisches Binary); Cutscene nach dem Editor dann voller Glitches. Bink-Thread-Lebenszyklus ist in guten und schlechten Läufen identisch → das Video wird dekodiert, nur die Übernahme als Textur scheitert (Texture-Cache / Speicherüberwachung, timing-abhängig). Erst ab Lauf 15 (`--redzone`) beobachtet. | nicht untersucht |
+| 6 | `k16UScaled`-Texturen werden als Null gebunden (`ab1a305`); Shader-seitige Konvertierung (als `R16_UINT` sampeln, `OpConvertUToF`) fehlt | offen |
+| 7 | Depth-Feedback-Pässe laufen ohne Layout-Übergang (`541d11f`); Bildqualität dieser Pässe (Nebel, Partikel) unklar | offen |
+| 8 | Indexed-Tables mit unbeschränktem Index nutzen ein festes 32-Einträge-Budget (`2ee0ab1`); Einträge jenseits der echten Tabelle werden genullt, Indizes ≥ 32 fallen auf Kandidat 0 zurück | akzeptiert, beobachten |
 
 ## Geplante Themen
 
