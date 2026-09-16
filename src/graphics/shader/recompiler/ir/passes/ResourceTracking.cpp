@@ -5,6 +5,8 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstdio>
 #include <fmt/format.h>
 #include <span>
 #include <utility>
@@ -71,6 +73,40 @@ const char* StageName(ShaderType stage) {
 		case ShaderType::Compute: return "compute";
 		default: return "unknown";
 	}
+}
+
+// Renders the defining instruction tree of a descriptor dword for diagnostics.
+std::string DescribeValue(const Program& program, Value value, uint32_t depth = 0) {
+	value = value.Resolve();
+	if (value.IsImmediate()) {
+		return value.GetType() == Type::U32 ? fmt::format("0x{:x}", value.U32()) : "imm";
+	}
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr) {
+		return "?";
+	}
+	std::string text(ValueOpcodeName(inst->GetOpcode()));
+	const auto  op = inst->GetOpcode();
+	if (op == ValueOpcode::ReadConst || op == ValueOpcode::ReadConstBuffer ||
+	    op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::LoadBufferU32) {
+		const auto flags = inst->Flags<MemoryFlags>();
+		if (flags.index < program.memory_info.size()) {
+			const auto& memory = program.memory_info[flags.index];
+			text += fmt::format("[kind={} off={} pc=0x{:x}]", static_cast<uint32_t>(memory.kind),
+			                    memory.offset, flags.pc);
+		}
+	}
+	if (depth >= 6u || inst->NumArgs() == 0u) {
+		return text;
+	}
+	text += "(";
+	for (size_t i = 0; i < inst->NumArgs() && i < 4u; i++) {
+		text += (i == 0 ? "" : ", ") + DescribeValue(program, inst->Arg(i), depth + 1u);
+	}
+	if (inst->NumArgs() > 4u) {
+		text += ", ...";
+	}
+	return text + ")";
 }
 
 uint32_t ByteExtent(const MemoryInfo& memory) {
@@ -546,8 +582,12 @@ private:
 			bad_dword = 0;
 		}
 		if (!ValidateSource(descriptor, bad_dword)) {
-			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
-			                     ValueOpcodeName(expected), bad_dword));
+			const auto ir = ProgramToString(m_program);
+			std::fprintf(stderr, "shader resource tracking: IR of hash=0x%016" PRIx64 "\n%s\n",
+			             m_program.shader_hash, ir.c_str());
+			Fail(pc, fmt::format("{} dword {} is not a valid runtime value: {}",
+			                     ValueOpcodeName(expected), bad_dword,
+			                     DescribeValue(m_program, descriptor.dwords[bad_dword])));
 		}
 		source = InternSource(descriptor);
 	}
