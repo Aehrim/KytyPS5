@@ -449,12 +449,25 @@ void TestInvariantIndirectImageMaterialization() {
         "malformed indirect image pattern was partially accepted");
 
   auto wrapped_immediate = MakeIndirectImageFixture(false, 4u);
-  BuildSrtPlan(wrapped_immediate->program);
-  CheckFatal([&] { TrackResources(wrapped_immediate->program); },
-             "not a valid runtime value",
-             "wrapped scalar immediate entered the invariant image proof");
-  Check(!wrapped_immediate->program.resource_tracking_complete,
-        "wrapped scalar immediate entered the invariant image proof");
+  wrapped_immediate->PlanAndTrack();
+  const auto wrapped_source =
+      wrapped_immediate->program.info.images[0].source;
+  Check(wrapped_source < wrapped_immediate->program.descriptor_sources.size() &&
+            wrapped_immediate->program.descriptor_sources[wrapped_source]
+                .indirect_image.has_value() &&
+            wrapped_immediate->program.descriptor_sources[wrapped_source]
+                    .indirect_image->selector_offset == 8u,
+        "scalar immediate was not folded into the material selector offset");
+  auto wrapped_plan = ExtractResourcePlan(wrapped_immediate->program);
+  memory.words[(0x1000u - memory.base + 36u) / 4u] = 0u;
+  memory.words[(0x1000u - memory.base + 68u) / 4u] = 0u;
+  memory.words[(0x1000u - memory.base + 40u) / 4u] = 1u;
+  ResourceSnapshot wrapped_snapshot;
+  ResourceSpecialization wrapped_specialization;
+  Check(MaterializeResources(wrapped_plan, runtime, wrapped_snapshot,
+                             wrapped_specialization) &&
+            wrapped_snapshot.images.size() == 2,
+        "folded material immediate did not probe the shifted key records");
 }
 
 void TestComputeBufferFill() {
