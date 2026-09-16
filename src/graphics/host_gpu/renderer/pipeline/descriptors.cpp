@@ -463,21 +463,34 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 	    storage || surface_format.conversion_format != Prospero::BufferFormat::kInvalid
 	        ? vk::ComponentMapping {}
 	        : TextureGetComponentMapping(descriptor.DstSelXYZW(), surface_format.host_to_storage);
+	// A base array slice beyond the resource's layers cannot address anything; clamp it to the
+	// last layer instead of aborting the draw.
+	const auto clamped_base_layer = [&]() {
+		const auto base_layer = static_cast<uint32_t>(descriptor.BaseArray5());
+		if (base_layer < image_layers) {
+			return base_layer;
+		}
+		static std::atomic<uint32_t> layer_log_count {0};
+		if (layer_log_count.fetch_add(1) < 16u) {
+			LOGF("texture base layer %u clamped to %u layers: dimension=%u type=%u "
+			     "dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+			     base_layer, image_layers, static_cast<uint32_t>(resource.dimension),
+			     static_cast<uint32_t>(descriptor.Type()), descriptor.fields[0],
+			     descriptor.fields[1], descriptor.fields[2], descriptor.fields[3],
+			     descriptor.fields[4], descriptor.fields[5], descriptor.fields[6],
+			     descriptor.fields[7]);
+		}
+		return image_layers - 1u;
+	};
 	switch (resource.dimension) {
 		case ShaderRecompiler::Decoder::ImageDimension::Dim1D:
-			view.type       = vk::ImageViewType::e1D;
-			view.base_layer = descriptor.BaseArray5();
-			if (view.base_layer >= image_layers) {
-				EXIT("texture base layer is out of bounds\n");
-			}
+			view.type        = vk::ImageViewType::e1D;
+			view.base_layer  = clamped_base_layer();
 			view.layer_count = 1;
 			break;
 		case ShaderRecompiler::Decoder::ImageDimension::Dim1DArray:
-			view.type       = vk::ImageViewType::e1DArray;
-			view.base_layer = descriptor.BaseArray5();
-			if (view.base_layer >= image_layers) {
-				EXIT("texture array base layer is out of bounds\n");
-			}
+			view.type        = vk::ImageViewType::e1DArray;
+			view.base_layer  = clamped_base_layer();
 			view.layer_count = image_layers - view.base_layer;
 			break;
 		case ShaderRecompiler::Decoder::ImageDimension::Dim3D:
@@ -487,20 +500,14 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 			break;
 		case ShaderRecompiler::Decoder::ImageDimension::Dim2DArray:
 		case ShaderRecompiler::Decoder::ImageDimension::Dim2DMsaaArray:
-			view.type       = vk::ImageViewType::e2DArray;
-			view.base_layer = descriptor.BaseArray5();
-			if (view.base_layer >= image_layers) {
-				EXIT("texture array base layer is out of bounds\n");
-			}
+			view.type        = vk::ImageViewType::e2DArray;
+			view.base_layer  = clamped_base_layer();
 			view.layer_count = image_layers - view.base_layer;
 			break;
 		case ShaderRecompiler::Decoder::ImageDimension::Dim2D:
 		case ShaderRecompiler::Decoder::ImageDimension::Dim2DMsaa:
-			view.type       = vk::ImageViewType::e2D;
-			view.base_layer = descriptor.BaseArray5();
-			if (view.base_layer >= image_layers) {
-				EXIT("texture base layer is out of bounds\n");
-			}
+			view.type        = vk::ImageViewType::e2D;
+			view.base_layer  = clamped_base_layer();
 			view.layer_count = 1;
 			break;
 		default: EXIT("unsupported texture view dimension\n");
