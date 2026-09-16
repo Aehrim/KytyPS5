@@ -308,8 +308,15 @@ uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1)
 }
 
 uint32_t EmitFPSaturate32(EmitterState& state, uint32_t arg0) {
-	return EmitExt(state, TypeF32(state), GLSLstd450FClamp,
-	               {arg0, ConstantF32(state, 0), ConstantF32(state, 0x3f800000u)});
+	// Game shaders run with DX10_CLAMP set, so the clamp modifier turns NaN into zero; games
+	// rely on it to scrub NaN out of temporal accumulators (Demon's Souls' fog volume).
+	const auto clamped = EmitExt(state, TypeF32(state), GLSLstd450FClamp,
+	                             {arg0, ConstantF32(state, 0), ConstantF32(state, 0x3f800000u)});
+	const auto is_nan  = Binary(state, spv::OpFUnordNotEqual, TypeBool(state), arg0, arg0);
+	const auto result  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelect, TypeF32(state), result, is_nan, ConstantF32(state, 0),
+	                          clamped);
+	return result;
 }
 
 uint32_t EmitSMulHi(EmitterState& state, uint32_t arg0, uint32_t arg1) {
