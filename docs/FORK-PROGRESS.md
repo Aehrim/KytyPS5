@@ -160,7 +160,15 @@ Welt mit VS 184 / PS 292 / CS 717 Shadern. Fallback-Häufigkeiten in Lauf 19: Ma
     eine 2DArray-View auf ein 2D-Bild. → Bei angefragtem `Dim2DArray` bleibt es `Dim2DArray`. Echter Fix, kein
     Fallback. Commit `f5efe1a`. Nicht anwendbar auf Cubemap-Tabellen (pc `0x1470`): `cube` ändert die
     Koordinatenberechnung im Code; der dortige 2D-Kandidat ist ein 1×4-Platzhalter, Null ist korrekt.
-16. **View-Layer-Clamp** (`imageView.cpp`, Commit `cf02bfa`), siehe 14.
+16. **View-Layer-Clamp** (`imageView.cpp`, Commit `cf02bfa`), siehe 14. Nachtrag zu 15: Die Promotion gilt nur für
+    *gesampelte* Bilder – Storage-Views müssen den Deskriptor-Typ behalten (Lauf 21 brach sonst beim Start ab). Commit
+    `3490629`. Ergebnis Lauf 22: keine Nulls mehr bei `0xfc`; übrig sind die Cubemap-Tabellen (`0x1044`, `0x1470`).
+17. **USCALED/SSCALED-Texturen** (`gpu_format.cpp`, `spirvEmitterImage.cpp`): `k16UScaled`, `k8_8UScaled`,
+    `k8_8SScaled`, `k10_11_11UScaled` werden jetzt über den Konvertierungspfad gesampelt – Backing `R16_UINT`
+    bzw. `R32_UINT`, Bitfeld-Extraktion wie bisher, danach `OpConvertUToF`/`OpConvertSToF` + `Bitcast`, sodass der
+    Shader die Float-Bits bekommt, die die Hardware für Scaled-Formate liefert; Swizzle-Konstante „1“ wird `1.0f`.
+    Weitere „unsupported format“-Nummern (4, 32, 49, 52, 84) wechseln pro Lauf → Zufallsbits aus
+    Tabellen-Fremdeinträgen, korrekt genullt. Commit `0cbe4f5`.
 
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
