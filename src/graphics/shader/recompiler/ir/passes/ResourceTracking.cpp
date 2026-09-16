@@ -376,6 +376,144 @@ private:
 		           : nullptr;
 	}
 
+	const MemoryInfo* AddressReadMemory(const Inst& read, uint32_t& index) const {
+		if (read.GetOpcode() != ValueOpcode::LoadAddressU32 || read.NumArgs() != 4u) {
+			return nullptr;
+		}
+		index = read.Flags<MemoryFlags>().index;
+		if (index >= m_program.memory_info.size()) {
+			return nullptr;
+		}
+		const auto& memory = m_program.memory_info[index];
+		return memory.kind == ResourceKind::ScalarAddress && memory.data_bits == 32u &&
+		               memory.data_dwords == 1u
+		           ? &memory
+		           : nullptr;
+	}
+
+	// Upper bound on the values a table index expression can take.
+	static bool BoundedIndexCount(Value value, uint32_t& count) {
+		const auto* inst = value.Resolve().TryInstruction();
+		if (inst == nullptr) {
+			return false;
+		}
+		uint32_t immediate = 0;
+		switch (inst->GetOpcode()) {
+			case ValueOpcode::FindILsb32:
+				// A zero mask yields -1, which falls outside the table like any unmapped key.
+				count = 32u;
+				return true;
+			case ValueOpcode::BitwiseAnd32:
+			case ValueOpcode::UMin32:
+				if (inst->NumArgs() == 2u &&
+				    (ImmediateU32(inst->Arg(0), immediate) ||
+				     ImmediateU32(inst->Arg(1), immediate)) &&
+				    immediate < ShaderInfo::MaxImages) {
+					count = immediate + 1u;
+					return true;
+				}
+				return false;
+			default: return false;
+		}
+	}
+
+	// Matches a T# read from a static table at address + offset + (index << 5) with a provably
+	// bounded index, as produced by waterfall loops over light or decal masks.
+	bool TryMakeIndexedImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
+		if (handle.GetOpcode() != ValueOpcode::GetImageResource || handle.NumArgs() != 8u) {
+			return false;
+		}
+		std::array<Inst*, 8> reads {};
+		Inst*                address_handle = nullptr;
+		Value                offset;
+		uint32_t             base_offset = 0;
+		for (uint32_t dword = 0; dword < reads.size(); dword++) {
+			reads[dword] = handle.Arg(dword).Resolve().TryInstruction();
+			if (reads[dword] == nullptr) {
+				return false;
+			}
+			uint32_t    memory_index = 0;
+			const auto* memory       = AddressReadMemory(*reads[dword], memory_index);
+			uint32_t    extra        = 0;
+			if (memory == nullptr || !MemoryIndexBelongsTo(memory_index, *reads[dword]) ||
+			    !ImmediateU32(reads[dword]->Arg(2), extra) || extra != 0u) {
+				return false;
+			}
+			if (dword == 0u) {
+				base_offset = memory->offset;
+			} else if (memory->offset != base_offset + dword * sizeof(uint32_t)) {
+				return false;
+			}
+			auto* current = reads[dword]->Arg(0).Resolve().TryInstruction();
+			if (current == nullptr || current->GetOpcode() != ValueOpcode::GetAddressResource ||
+			    (address_handle != nullptr && current != address_handle)) {
+				return false;
+			}
+			address_handle = current;
+			if (dword == 0u) {
+				offset = reads[dword]->Arg(1).Resolve();
+			} else if (!EquivalentValue(m_program, offset, reads[dword]->Arg(1))) {
+				return false;
+			}
+			plan.memory[dword] = memory_index;
+			plan.reads[dword]  = reads[dword];
+		}
+
+		auto* entry = offset.TryInstruction();
+		if (entry != nullptr && entry->GetOpcode() == ValueOpcode::IAdd32 &&
+		    entry->NumArgs() == 2u) {
+			uint32_t immediate = 0;
+			if (ImmediateU32(entry->Arg(0), immediate)) {
+				offset = entry->Arg(1).Resolve();
+			} else if (ImmediateU32(entry->Arg(1), immediate)) {
+				offset = entry->Arg(0).Resolve();
+			} else {
+				return false;
+			}
+			base_offset += immediate;
+			entry = offset.TryInstruction();
+		}
+		uint32_t shift_amount = 0;
+		if (entry == nullptr || entry->GetOpcode() != ValueOpcode::ShiftLeftLogical32 ||
+		    entry->NumArgs() != 2u || !ImmediateU32(entry->Arg(1), shift_amount) ||
+		    shift_amount != 5u) {
+			return false;
+		}
+		const auto index = entry->Arg(0).Resolve();
+		uint32_t   count = 0;
+		if (!BoundedIndexCount(index, count)) {
+			return false;
+		}
+		const std::array<const Inst*, 1> image_users {&handle};
+		for (const auto* read: reads) {
+			if (!UsesOnly(*read, image_users)) {
+				return false;
+			}
+		}
+
+		DescriptorSource address_source;
+		MakeSource(*address_handle, 2u, false, false, address_source, pc);
+		uint32_t bad_dword = 0;
+		if (!ValidateSource(address_source, bad_dword)) {
+			return false;
+		}
+		const auto address_source_index = InternSource(address_source);
+
+		DescriptorSource image_source;
+		image_source.dword_count = 8u;
+		image_source.dwords.fill(Value(0u));
+		image_source.dwords[4]      = address_source.dwords[0];
+		image_source.dwords[5]      = address_source.dwords[1];
+		image_source.indirect_image = DescriptorSource::IndirectImage {
+		    UINT32_MAX, address_source_index, 32u, base_offset, 0u, count};
+
+		plan.handle = &handle;
+		plan.source = InternSource(image_source);
+		plan.key    = index;
+		plan.roots  = image_source.dwords;
+		return true;
+	}
+
 	bool MemoryIndexBelongsTo(uint32_t index, const Inst& owner) const {
 		for (const auto* block: m_program.blocks) {
 			for (const auto& inst: *block) {
@@ -574,7 +712,9 @@ private:
 					continue;
 				}
 				IndirectImagePlan plan;
-				if (TryMakeIndirectImage(*handle, inst.Flags<MemoryFlags>().pc, plan)) {
+				const auto        pc = inst.Flags<MemoryFlags>().pc;
+				if (TryMakeIndirectImage(*handle, pc, plan) ||
+				    TryMakeIndexedImage(*handle, pc, plan)) {
 					m_indirect_images.push_back(std::move(plan));
 				}
 			}

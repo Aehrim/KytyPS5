@@ -471,6 +471,83 @@ void TestInvariantIndirectImageMaterialization() {
         "folded material immediate did not probe the shifted key records");
 }
 
+void TestIndexedImageMaterialization() {
+  auto fixture = std::make_unique<Fixture>();
+  const auto address =
+      fixture->Address(fixture->UserData(0), fixture->UserData(1), 0x2000);
+  const auto mask = fixture->Emit(ValueOpcode::ReadFirstLane,
+                                  {fixture->UserData(2), Value(true)});
+  const auto index = fixture->Emit(ValueOpcode::FindILsb32, {mask});
+  const auto entry =
+      fixture->Emit(ValueOpcode::ShiftLeftLogical32, {index, Value(5u)});
+  std::array<Value, 8> image_words;
+  for (uint32_t dword = 0; dword < image_words.size(); dword++) {
+    MemoryInfo word;
+    word.kind = ResourceKind::ScalarAddress;
+    word.offset = 0x100u + dword * sizeof(uint32_t);
+    image_words[dword] =
+        fixture->Emit(ValueOpcode::LoadAddressU32,
+                      {address, entry, Value(0u), Value(true)},
+                      fixture->AddMemory(word, 0x2000));
+  }
+  const auto image = fixture->Image(image_words, 0x2010);
+  const auto sampler =
+      fixture->Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}, 0x2010);
+  MemoryInfo sample;
+  sample.kind = ResourceKind::Image;
+  sample.image_dimension = Decoder::ImageDimension::Dim2D;
+  const auto sampled = fixture->Emit(ValueOpcode::ImageSampleRaw,
+                                     {image, sampler, fixture->ImageAddress()},
+                                     fixture->AddMemory(sample, 0x2010));
+  const auto sampled_x =
+      fixture->Emit(ValueOpcode::CompositeExtractU32x4, {sampled, Value(0u)});
+  fixture->Emit(ValueOpcode::ReferenceU32, {sampled_x});
+
+  fixture->PlanAndTrack();
+  Check(fixture->program.info.images.size() == 1, "indexed image was not tracked");
+  const auto source = fixture->program.info.images[0].source;
+  Check(source < fixture->program.descriptor_sources.size() &&
+            fixture->program.descriptor_sources[source]
+                .indirect_image.has_value() &&
+            fixture->program.descriptor_sources[source]
+                    .indirect_image->key_count == 32u &&
+            fixture->program.descriptor_sources[source]
+                    .indirect_image->selector_offset == 0x100u,
+        "indexed image table was not planned");
+  auto plan = ExtractResourcePlan(fixture->program);
+  EliminateDeadCode(fixture->program.blocks);
+  ValidateProgram(fixture->program, true);
+
+  std::array<uint32_t, 3> user_data{0x1000u, 0u, 5u};
+  LinearTestMemory memory;
+  std::array<uint32_t, 8> image_descriptor{};
+  image_descriptor[0] = 0x20u;
+  image_descriptor[1] =
+      static_cast<uint32_t>(
+          Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float)
+      << 20u;
+  image_descriptor[2] = 3u | (3u << 14u);
+  image_descriptor[3] =
+      Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D)
+       << 28u);
+  for (uint32_t dword = 0; dword < image_descriptor.size(); dword++) {
+    memory.words[(0x1100u - memory.base) / 4u + dword] = image_descriptor[dword];
+    memory.words[(0x1120u - memory.base) / 4u + dword] = image_descriptor[dword];
+  }
+  memory.words[(0x1120u - memory.base) / 4u] ^= 1u;
+  SrtRuntime runtime{.user_data = user_data,
+                     .userdata = &memory,
+                     .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 3 &&
+            std::equal(image_descriptor.begin(), image_descriptor.end(),
+                       snapshot.images[0].dwords.begin()),
+        "indexed image table did not materialize its entries");
+}
+
 void TestComputeBufferFill() {
   struct Options {
     bool scalar = false;
@@ -2059,6 +2136,7 @@ int main() {
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
     Run("dynamic storage mips", TestDynamicStorageMipTracking);
     Run("invariant indirect images", TestInvariantIndirectImageMaterialization);
+    Run("indexed image table", TestIndexedImageMaterialization);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("phi validation", TestPhiValidation);

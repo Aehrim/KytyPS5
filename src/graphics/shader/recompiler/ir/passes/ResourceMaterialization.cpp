@@ -199,6 +199,47 @@ bool ReadScalarBufferWord(const ShaderBufferResource& descriptor, uint32_t dynam
 	return true;
 }
 
+// Reads every entry of a static T# table addressed by a bounded index. Entries that cannot be
+// read or do not hold a valid image descriptor become null candidates.
+bool MaterializeIndexedImage(const DescriptorSource::IndirectImage& indirect,
+                             const DescriptorValue& address_value, bool r128,
+                             const SrtRuntime& runtime, IndirectImage& result) {
+	if (address_value.dword_count != 2u || indirect.key_count == 0u ||
+	    indirect.key_count > ShaderInfo::MaxImages) {
+		return false;
+	}
+	const auto base =
+	    ((static_cast<uint64_t>(address_value.dwords[1]) << 32u) | address_value.dwords[0]) &
+	    AddressMask;
+	IndirectImage next;
+	next.keys.reserve(indirect.key_count);
+	next.candidates.reserve(indirect.key_count);
+	for (uint32_t key = 0; key < indirect.key_count; key++) {
+		const auto entry =
+		    base + indirect.selector_offset + static_cast<uint64_t>(key) * indirect.selector_stride;
+		DescriptorValue candidate;
+		candidate.dword_count = 8u;
+		bool readable         = true;
+		for (uint32_t dword = 0; dword < candidate.dword_count && readable; dword++) {
+			readable = ReadSpecializationWord(runtime, entry + dword * sizeof(uint32_t),
+			                                  candidate.dwords[dword]);
+		}
+		if (!readable || NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128)) {
+			candidate.dwords.fill(0);
+		}
+		next.keys.push_back(key);
+		const auto found = std::ranges::find(next.descriptors, candidate);
+		if (found == next.descriptors.end()) {
+			next.descriptors.push_back(candidate);
+			next.candidates.push_back(static_cast<uint32_t>(next.descriptors.size() - 1u));
+		} else {
+			next.candidates.push_back(static_cast<uint32_t>(found - next.descriptors.begin()));
+		}
+	}
+	result = std::move(next);
+	return true;
+}
+
 bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
                               const DescriptorValue&                 material_value,
                               const DescriptorValue& heap_value, bool r128,
@@ -320,19 +361,22 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 				next.images[image_index].dword_count = 8u;
 				continue;
 			}
-			const std::array requests {source->indirect_image->material_source,
-			                           source->indirect_image->heap_source};
-			SrtRuntime       clean_runtime = runtime;
-			clean_runtime.read_memory      = runtime.read_specialization_memory;
+			const bool            indexed = source->indirect_image->key_count != 0u;
+			std::vector<uint32_t> requests {source->indirect_image->heap_source};
+			if (!indexed) {
+				requests.insert(requests.begin(), source->indirect_image->material_source);
+			}
+			SrtRuntime clean_runtime  = runtime;
+			clean_runtime.read_memory = runtime.read_specialization_memory;
 			std::vector<DescriptorValue> tables;
 			if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
 				return false;
 			}
-			const auto&   material = tables[0];
-			const auto&   heap     = tables[1];
 			IndirectImage table;
-			if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
-			                              runtime, table)) {
+			if (indexed ? !MaterializeIndexedImage(*source->indirect_image, tables[0], image.r128,
+			                                       runtime, table)
+			            : !MaterializeIndirectImage(*source->indirect_image, tables[0], tables[1],
+			                                        image.r128, runtime, table)) {
 				return false;
 			}
 			next.images[image_index] = table.descriptors[table.candidates[0]];
