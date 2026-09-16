@@ -24,6 +24,14 @@ Logs der Testläufe liegen lokal unter `_Build/logs/runN/` (nicht im Repo).
 **Startoptionen für Demon's Souls:** `--redzone` ist Pflicht (siehe Meilenstein 9); für Diagnose `--printf-direction File`,
 bei Shader-Problemen zusätzlich `--shader-log-direction File`.
 
+**RenderDoc-Workflow:** RenderDoc (winget `BaldurKarlsson.RenderDoc`) installieren; Emulator mit `--rd` starten (findet die DLL
+über die Registry, Log: „RenderDoc: API 1.6.0 bound“); **F1** im Spielfenster nimmt zwei Guest-Flips auf →
+`_Build/windows/_RenderDoc/kyty_<id>_capture.rdc` (~2 GB). Während des Captures kopiert RenderDoc alle GPU-Ressourcen:
+RAM-Bedarf des Emulators steigt stark, keine Auswertung parallel laufen lassen (32 GB waren voll → Vulkan-OOM im
+Stream-Buffer, Capture verloren). Für Capture-Läufe `--printf-direction Silent` (das Guest-Log wuchs auf 4 GB).
+Auswertung headless: `qrenderdoc.exe --python <script.py>` mit dem `renderdoc`-Modul (Skripte im Scratchpad:
+`rd_overview.py` = Aktionsliste, `rd_passes.py` = Pipeline-State pro Pass-Gruppe).
+
 ## Stand
 
 | Bereich | Status |
