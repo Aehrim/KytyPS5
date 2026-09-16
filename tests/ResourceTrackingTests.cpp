@@ -325,7 +325,7 @@ void TestInvariantIndirectImageMaterialization() {
         "rejected planning memory read mutated the snapshot");
   memory.fail_address = UINT64_MAX;
 
-  memory.words[(0x1000u - memory.base + 36u) / 4u] = 1u;
+  memory.words[(0x1000u - memory.base + 4u) / 4u] = 1u;
   for (uint32_t dword = 0; dword < image_descriptor.size(); dword++) {
     memory.words[(0x2000u - memory.base) / 4u + dword] = 0u;
     memory.words[(0x2020u - memory.base) / 4u + dword] = 0u;
@@ -350,7 +350,7 @@ void TestInvariantIndirectImageMaterialization() {
         image_descriptor[dword];
   }
   memory.words[(0x2020u - memory.base) / 4u] ^= 1u;
-  memory.words[(0x1000u - memory.base + 36u) / 4u] = 1u;
+  memory.words[(0x1000u - memory.base + 4u) / 4u] = 1u;
   ResourceSnapshot dynamic_snapshot;
   ResourceSpecialization dynamic_specialization;
   Check(MaterializeResources(resource_plan, runtime, dynamic_snapshot,
@@ -410,7 +410,8 @@ void TestInvariantIndirectImageMaterialization() {
     memory.words[(0x2040u - memory.base) / 4u + dword] =
         image_descriptor[dword];
   }
-  memory.words[(0x1000u - memory.base + 68u) / 4u] = 2u;
+  user_data[2] = 3u;
+  memory.words[(0x1000u - memory.base + 452u) / 4u] = 2u;
   Check(MaterializeResources(resource_plan, runtime, rebound_snapshot,
                              rebound_specialization) &&
             rebound_specialization != collapsed_specialization,
@@ -459,9 +460,9 @@ void TestInvariantIndirectImageMaterialization() {
                     .indirect_image->selector_offset == 8u,
         "scalar immediate was not folded into the material selector offset");
   auto wrapped_plan = ExtractResourcePlan(wrapped_immediate->program);
-  memory.words[(0x1000u - memory.base + 36u) / 4u] = 0u;
-  memory.words[(0x1000u - memory.base + 68u) / 4u] = 0u;
-  memory.words[(0x1000u - memory.base + 40u) / 4u] = 1u;
+  memory.words[(0x1000u - memory.base + 4u) / 4u] = 0u;
+  memory.words[(0x1000u - memory.base + 452u) / 4u] = 0u;
+  memory.words[(0x1000u - memory.base + 8u) / 4u] = 1u;
   ResourceSnapshot wrapped_snapshot;
   ResourceSpecialization wrapped_specialization;
   Check(MaterializeResources(wrapped_plan, runtime, wrapped_snapshot,
