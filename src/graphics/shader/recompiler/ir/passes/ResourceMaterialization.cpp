@@ -96,6 +96,19 @@ bool ValidImageDescriptor(const DescriptorValue& descriptor, bool r128 = false) 
 	return true;
 }
 
+// Rejects descriptors whose array and mip fields contradict each other. Table probes can land on
+// unrelated memory that still passes the type and format checks; such words never describe a
+// texture the shader can sample, and binding them creates unusable host images.
+bool PlausibleImageDescriptor(const DescriptorValue& descriptor, bool check_mips = true) {
+	constexpr uint32_t MaxArrayLayers = 2048u;
+	const auto         depth          = descriptor.dwords[4] & 0x1fffu;
+	const auto         base_array     = (descriptor.dwords[4] >> 16u) & 0x1fffu;
+	const auto         base_level     = (descriptor.dwords[3] >> 12u) & 0xfu;
+	const auto         last_level     = (descriptor.dwords[3] >> 16u) & 0xfu;
+	return depth < MaxArrayLayers && base_array <= depth &&
+	       (!check_mips || base_level <= last_level);
+}
+
 uint32_t DescriptorImageSwizzle(const DescriptorValue& descriptor) {
 	return descriptor.dwords[3] & 0xfffu;
 }
@@ -224,7 +237,8 @@ bool MaterializeIndexedImage(const DescriptorSource::IndirectImage& indirect,
 			readable = ReadSpecializationWord(runtime, entry + dword * sizeof(uint32_t),
 			                                  candidate.dwords[dword]);
 		}
-		if (!readable || NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128)) {
+		if (!readable || NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) ||
+		    !PlausibleImageDescriptor(candidate)) {
 			candidate.dwords.fill(0);
 		}
 		static std::atomic<uint32_t> entry_log_count {0};
@@ -309,7 +323,8 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 				return false;
 			}
 		}
-		if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128)) {
+		if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) ||
+		    !PlausibleImageDescriptor(candidate)) {
 			candidate.dwords.fill(0);
 		}
 		const auto found = std::ranges::find(next.descriptors, candidate);
@@ -397,6 +412,20 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 		} else {
 			auto descriptor = *cursor++;
 			if (!ValidImageDescriptor(descriptor, image.r128)) {
+				descriptor.dwords.fill(0);
+			} else if (!NullImageDescriptor(descriptor) &&
+			           !PlausibleImageDescriptor(descriptor, false)) {
+				static std::atomic<uint32_t> implausible_log_count {0};
+				if (implausible_log_count.fetch_add(1) < 16u) {
+					std::fprintf(stderr,
+					             "shader resource specialization: hash=0x%016llx image %u at pc "
+					             "0x%08x has implausible array/mip fields, binding null: %08x %08x "
+					             "%08x %08x %08x %08x %08x %08x\n",
+					             static_cast<unsigned long long>(program.shader_hash), image_index,
+					             image.first_use_pc, descriptor.dwords[0], descriptor.dwords[1],
+					             descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4],
+					             descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
+				}
 				descriptor.dwords.fill(0);
 			}
 			next.images[image_index] = descriptor;
