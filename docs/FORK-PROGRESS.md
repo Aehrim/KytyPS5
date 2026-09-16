@@ -70,6 +70,13 @@ erreichbaren Keys vorab enumeriert und den Shader per Binary-Search wählen läs
 Zusätzlich: Bei einem Tracking-Fatal wird jetzt die Abhängigkeitskette des abgelehnten Dwords und das komplette IR
 ausgegeben (`02bd07c`), damit die nächsten Fälle dieser Klasse ohne Debugger lesbar sind.
 
+4. **Sampler-Phi nach Kill-Pfad** (`ResourceTracking.cpp`, Pixel-Shader `0x8205bcef6a135cee` pc `0x294`): Die
+   Diagnose zeigte `GetSamplerResource dword 0 = Phi(0x0, ReadConst[SRT slot 0x1a])`. Der Structurizer leitet den
+   „alle Pixel verworfen“-Ausgang (`exec = 0`, pc `0x654`) durch die Merge-Blöcke des restlichen Codes; auf diesem Arm
+   wurde das Sampler-Register nie geladen (SGPR-Startwert 0). Kein Lane erreicht das Sample über diesen Arm.
+   → `LowerDescriptorPhi` überspringt Arme mit dem unbeschriebenen Wert 0 und nimmt den einzigen beschriebenen Arm.
+   Regressionstest `unwritten descriptor phi arm`. Commit `8a023ba`.
+
 **Ergebnis.** Boot → Logos → Hauptmenü → Neues Spiel → Charakter-Editor. Shader-Zähler beim letzten Lauf:
 VS 23 / PS 46 / CS 115.
 
@@ -84,7 +91,7 @@ VS 23 / PS 46 / CS 115.
 
 | # | Problem | Stand |
 |---|---|---|
-| 1 | Pixel-Shader `0x8205bcef6a135cee` pc `0x294`: `GetSamplerResource dword 0 is not a valid runtime value` | Diagnose-Lauf mit IR-Dump läuft |
+| 1 | Pixel-Shader `0x8205bcef6a135cee` pc `0x294`: `GetSamplerResource dword 0 is not a valid runtime value` | Fix `8a023ba`, Verifikation im Spiel ausstehend |
 | 2 | Kein Ton ab Hauptmenü (Logo-Video hat Ton; SDL-Gerät offen; ATRAC9 dekodiert) | nicht untersucht – vermutlich anderer Ausgabepfad des Spiel-Mixers (`cp11_groupmix`) |
 | 3 | Null-Fallback bei inkompatiblen Kandidaten kann sichtbar werden (schwarze Reflexion o. ä.) | akzeptiert, beobachten |
 | 4 | Linux: Crash im Runtime-Linker (upstream #614) | nicht relevant für uns, Windows primär |
