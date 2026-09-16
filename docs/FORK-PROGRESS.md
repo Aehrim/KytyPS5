@@ -178,6 +178,18 @@ Welt mit VS 184 / PS 292 / CS 717 Shadern. Fallback-Häufigkeiten in Lauf 19: Ma
     Weitere „unsupported format“-Nummern (4, 32, 49, 52, 84) wechseln pro Lauf → Zufallsbits aus
     Tabellen-Fremdeinträgen, korrekt genullt. Commit `0cbe4f5`.
 
+**RenderDoc-Befund (Capture 1, Lauf 24, 2026-09-17):** Frame-Struktur von Demon's Souls (pro Frame ~5 800 Draws, ~3 600 Dispatches):
+Schatten (1024² D32-Arrays, 80 + 4 Layer) → Depth-Prepass 1440p (BC4-Alphamasken) → Volumen-Nebel (214×120×64
+RGBA16F, 8 Slices je Draw) → Visibility-/G-Buffer (4× R32_UINT IDs + RG16F Motion-Vectors, >1 000 Draws) → Hi-Z/SSAO
+(Compute) → Clustered Lighting (Cluster-Gitter 32×24×24 und 256×128×64, Schatten-Atlas 384² × 360) → Material-/Decal-Pass
+(Draw 174246, echte BC1/BC7-Texturen gebunden) → **Lighting-Resolve (Fullscreen-Draw 1449 → HDR RGBA16F)** →
+Bloom/Post 720p, Auto-Exposure (Dispatch 1464) → UI + Upscale auf **3840×2160** (das Spiel legt seine Ausgabepuffer
+immer in 4K an; intern 1440p). Pixel-Sonde: **Der Lighting-Resolve schreibt an allen Probe-Punkten NaN** – das ist die
+Wurzel der bunten Flächen (NaN → Tonemapping → gesättigt/schwarz). Das RG16F-Target sind Motion-Vectors (~10⁻³), keine
+Normalen. Visibility-IDs plausibel. Nächster Schritt: RenderDoc-Pixel-Debugger auf Draw 1449, erste NaN-erzeugende
+Instruktion finden. Werkzeuge: `rd_overview.py`, `rd_passes.py`, `rd_dump.py` (PNG-Dump), `rd_probe.py` (PickPixel),
+`rd_debug.py` (DebugPixel) im Scratchpad.
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
