@@ -34,6 +34,7 @@ static RENDERDOC_API_1_6_0*        g_api             = nullptr;
 static std::atomic<RenderDocState> g_state           = RenderDocState::Idle;
 static uint32_t                    g_captured_flips  = 0;
 static std::atomic_bool            g_unavailable_log = false;
+static std::atomic<RenderContext*> g_renderer        = nullptr;
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 
@@ -130,7 +131,22 @@ void RenderDocRequestCapture() {
 	RenderDocState expected = RenderDocState::Idle;
 	if (g_state.compare_exchange_strong(expected, RenderDocState::Requested)) {
 		LOGF("RenderDoc: capture requested\n");
+		return;
 	}
+
+	// A second request ends a running capture: a guest that stops presenting would otherwise
+	// keep the capture open and growing forever.
+	auto* renderer = g_renderer.load(std::memory_order_acquire);
+	if (expected != RenderDocState::Capturing || renderer == nullptr) {
+		return;
+	}
+	Common::LockGuard render_lock(renderer->GetMutex());
+	Common::LockGuard queue_lock(renderer->GetGraphics().queue_mutex);
+	if (!g_state.compare_exchange_strong(expected, RenderDocState::Idle)) {
+		return;
+	}
+	const auto ok = g_api->EndFrameCapture(nullptr, nullptr);
+	LOGF(ok != 0 ? "RenderDoc: capture finished on request\n" : "RenderDoc: capture failed\n");
 }
 
 static void StartCapture() {
@@ -157,6 +173,7 @@ static void StartCapture() {
 }
 
 void RenderDocOnGuestFlip(RenderContext& renderer) {
+	g_renderer.store(&renderer, std::memory_order_release);
 	const auto state = g_state.load(std::memory_order_acquire);
 	if (g_api == nullptr || state == RenderDocState::Idle) {
 		return;
@@ -174,8 +191,11 @@ void RenderDocOnGuestFlip(RenderContext& renderer) {
 	if (state == RenderDocState::Requested) {
 		StartCapture();
 	} else {
+		auto capturing = RenderDocState::Capturing;
+		if (!g_state.compare_exchange_strong(capturing, RenderDocState::Idle)) {
+			return;
+		}
 		const auto ok = g_api->EndFrameCapture(nullptr, nullptr);
-		g_state.store(RenderDocState::Idle, std::memory_order_release);
 		LOGF(ok != 0 ? "RenderDoc: capture finished\n" : "RenderDoc: capture failed\n");
 	}
 }
