@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <mutex>
 #include <span>
 #include <vector>
 #include <vk_mem_alloc.h>
@@ -131,7 +132,10 @@ private:
 	[[nodiscard]] vk::Pipeline GetPipeline(uint32_t slot);
 	void                       SwapBgra16(Result input, Result output, uint32_t pixels);
 
-	GraphicContext&                         m_graphics;
+	GraphicContext& m_graphics;
+	// Scratch buffers whose GPU work finished; reused for requests of the same size.
+	std::mutex                              m_scratch_mutex;
+	std::vector<Scratch>                    m_scratch_pool;
 	CommandScheduler&                       m_scheduler;
 	StreamBuffer&                           m_stream_buffer;
 	vk::DescriptorSetLayout                 m_descriptor_layout = nullptr;
