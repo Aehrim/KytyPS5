@@ -5668,7 +5668,7 @@ public:
       auto stencil_storage_desc = MakeLinearDesc(
           base + second_stencil_offset, ms_stencil_size, vk::Format::eR8Uint,
           Prospero::BufferFormat::k8UInt, Prospero::ImageType::kColor2D,
-          {256, 256, 1}, 256, 1, 1);
+          ms_depth_desc.info.extent, 1, 1, 1);
       stencil_storage_desc.type = BindingType::Storage;
       stencil_storage_desc.view_info.usage = vk::ImageUsageFlagBits::eStorage;
       const auto stencil_storage_image =
@@ -7122,6 +7122,64 @@ public:
               !texture_cache.FindImageFromRange(base + second_stencil_offset,
                                                 ms_stencil_size, false),
               "unmapping depth retained its re-associated stencil proxy");
+
+      auto reused_stencil_color = MakeLinearDesc(
+          base + 0x2200000, 0x40000, vk::Format::eR8Unorm,
+          Prospero::BufferFormat::k8UNorm, Prospero::ImageType::kColor2D,
+          {480, 408, 1}, 1, 1, 1);
+      const auto reused_stencil_color_id =
+          texture_cache.FindImage(reused_stencil_color);
+      auto reused_stencil_depth = MakeLinearDesc(
+          base + 0x2240000, 0x10000, vk::Format::eD32SfloatS8Uint,
+          Prospero::BufferFormat::k32Float, Prospero::ImageType::kColor2D,
+          {128, 128, 1}, 1, 4, 1);
+      reused_stencil_depth.type = BindingType::DepthTarget;
+      reused_stencil_depth.info.stencil = {reused_stencil_color.info.data.address,
+                                          0x10000};
+      reused_stencil_depth.view_info.aspect =
+          vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+      reused_stencil_depth.view_info.usage =
+          vk::ImageUsageFlagBits::eDepthStencilAttachment;
+      const auto reused_stencil_depth_id =
+          texture_cache.FindImage(reused_stencil_depth);
+      TextureCacheTestAccess::AssociateStencil(
+          texture_cache, reused_stencil_depth_id,
+          reused_stencil_depth.info.stencil);
+      const auto reused_stencil_proxy = texture_cache.FindImageFromRange(
+          reused_stencil_depth.info.stencil.address,
+          reused_stencil_depth.info.stencil.size, false);
+      Require(name, "stencil address reuse preserves color",
+              reused_stencil_proxy &&
+                  reused_stencil_proxy != reused_stencil_color_id &&
+                  !texture_cache.GetImage(reused_stencil_color_id).depth_id &&
+                  texture_cache.GetImage(reused_stencil_proxy).depth_id ==
+                      reused_stencil_depth_id &&
+                  texture_cache.GetImage(reused_stencil_proxy).info.data ==
+                      reused_stencil_depth.info.stencil &&
+                  texture_cache.GetImage(reused_stencil_proxy).info.extent ==
+                      reused_stencil_depth.info.extent,
+              "a smaller stencil plane took ownership of an existing R8 image");
+      vk::ClearValue reused_stencil_color_clear{};
+      reused_stencil_color_clear.color.float32 =
+          std::array{1.0f, 0.0f, 0.0f, 0.0f};
+      TextureCacheTestAccess::ClearImage(
+          texture_cache, scheduler.Current(), reused_stencil_color_id,
+          {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+          reused_stencil_color_clear);
+      Require(name, "reused stencil plane clear",
+              texture_cache.ClearImageFromBuffer(
+                  scheduler.Current(), reused_stencil_depth.info.stencil.address,
+                  reused_stencil_depth.info.stencil.size, 0x5a5a5a5au) &&
+                  texture_cache.GetImage(reused_stencil_depth_id).IsGpuModified(),
+              "the separate stencil association did not resolve to depth");
+      Require(name, "color clear after stencil address reuse",
+              ReadCachedTexel(name, context, reused_stencil_color_id, {},
+                              {4, 1, 1}) == std::vector<u32>{0xffffffffu},
+              "stencil address reuse changed the native R8 clear contents");
+      texture_cache.UnmapMemory(reused_stencil_depth.info.data.address,
+                                reused_stencil_depth.info.data.size);
+      texture_cache.UnmapMemory(reused_stencil_color.info.data.address,
+                                reused_stencil_color.info.data.size);
 
       constexpr uint64_t exact_image_offset = 0x334100;
       constexpr uint64_t dirty_sibling_offset = 0x334200;
@@ -12271,7 +12329,7 @@ public:
     return ret;
   }
 
-  vk::Sampler CreateNearestSampler(const char *shader_name) {
+  vk::Sampler CreateNearestSampler(const char *shader_name, u32 mip_levels = 1) {
     vk::SamplerCreateInfo sampler_info{};
     sampler_info.sType = vk::StructureType::eSamplerCreateInfo;
     sampler_info.magFilter = vk::Filter::eNearest;
@@ -12281,7 +12339,7 @@ public:
     sampler_info.addressModeV = vk::SamplerAddressMode::eClampToEdge;
     sampler_info.addressModeW = vk::SamplerAddressMode::eClampToEdge;
     sampler_info.minLod = 0.0f;
-    sampler_info.maxLod = 0.0f;
+    sampler_info.maxLod = static_cast<float>(mip_levels - 1u);
     vk::Sampler sampler = nullptr;
     RequireVk(shader_name, "dispatch",
               m_device.createSampler(&sampler_info, nullptr, &sampler),
@@ -15484,7 +15542,7 @@ void RunCase(VulkanHarness *vulkan, const TestCase &test) {
         vk::ImageLayout::eGeneral);
   }
   if (needs_sampler) {
-    sampler = vulkan->CreateNearestSampler(test.name);
+    sampler = vulkan->CreateNearestSampler(test.name, sampled_image.mip_levels);
   }
 
   vulkan->Dispatch(test, compiled, buffer, needs_gds ? &gds_buffer : nullptr,
@@ -17139,6 +17197,251 @@ TestCase Scalar64BitOps() {
            O::V_MOV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
 }
 
+uint64_t ReferenceAshrI64(uint64_t bits, u32 count) {
+  const auto shift = count & 63u;
+  // Complementing negative values expresses sign fill using unsigned shifts.
+  return (bits & (uint64_t{1} << 63u)) != 0 ? ~(~bits >> shift) : bits >> shift;
+}
+
+TestCase ScalarAshrI64Edges(bool dynamic) {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name =
+      dynamic ? "ScalarAshrI64DynamicEdges" : "ScalarAshrI64ConstantEdges";
+  constexpr uint64_t sources[] = {0,
+                                  1,
+                                  0x80000000ull,
+                                  0x100000000ull,
+                                  0x7fffffffffffffffull,
+                                  0x8000000000000000ull,
+                                  0xffffffffffffffffull,
+                                  0x0123456789abcdefull,
+                                  0xfedcba9876543210ull};
+  constexpr u32 counts[] = {0,  1,  7,  31, 32,  33,         63,
+                            64, 65, 95, 96, 127, 0xffffffffu};
+  test.initial.assign(std::begin(counts), std::end(counts));
+  for (const auto source : sources) {
+    test.initial.push_back(static_cast<u32>(source));
+    test.initial.push_back(static_cast<u32>(source >> 32u));
+  }
+  test.expected = test.initial;
+  auto &code = test.code;
+  const auto load_scalar = [&](u32 reg, u32 index) {
+    AppendVMovU32(&code, 30, index * sizeof(u32));
+    AppendBufferLoadDword(&code, 1, 30);
+    code.push_back(EncodeVop1(0x02, reg, Vgpr(1)));
+  };
+  for (u32 source_index = 0; source_index < std::size(sources);
+       ++source_index) {
+    const auto source = sources[source_index];
+    // Runtime sources exercise both constant-count and dynamic-count emission.
+    load_scalar(20, static_cast<u32>(std::size(counts)) + source_index * 2u);
+    load_scalar(21,
+                static_cast<u32>(std::size(counts)) + source_index * 2u + 1u);
+    for (u32 index = 0; index < std::size(counts); ++index) {
+      const auto expected = ReferenceAshrI64(source, counts[index]);
+      if (dynamic) {
+        load_scalar(22, index);
+      }
+      // Start SCC at the opposite value so every result must update it.
+      code.push_back(
+          EncodeSopc(0x06, InlineU32(0), InlineU32(expected != 0 ? 1u : 0u)));
+      const auto count_src = dynamic                ? 22u
+                             : counts[index] <= 64u ? InlineU32(counts[index])
+                                                    : 255u;
+      code.push_back(EncodeSop2(0x23, 24, 20, count_src));
+      if (!dynamic && count_src == 255u) {
+        code.push_back(counts[index]);
+      }
+      code.push_back(EncodeSMovB32(26, 253));
+      const auto output = static_cast<u32>(test.expected.size());
+      AppendStoreSgprPair(&code, 24, output);
+      AppendStoreSgpr(&code, 26, output + 2u);
+      test.expected.push_back(static_cast<u32>(expected));
+      test.expected.push_back(static_cast<u32>(expected >> 32u));
+      test.expected.push_back(expected != 0 ? 1u : 0u);
+    }
+  }
+  AppendEnd(&code);
+  test.initial.resize(test.expected.size());
+  test.opcodes = {O::BUFFER_LOAD_DWORD,  O::V_READFIRSTLANE_B32,
+                  O::S_MOV_B32,          O::S_CMP_EQ_U32,
+                  O::S_ASHR_I64,         O::V_MOV_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.decoded_counts = {
+      {"S_ASHR_I64", std::size(sources) * std::size(counts)}};
+  test.required_spirv = {"OpShiftRightArithmetic"};
+  test.forbidden_spirv = {"OpTypeInt 64"};
+  return test;
+}
+
+TestCase ScalarAshrI64OperandsAndAliases() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = "ScalarAshrI64OperandsAndAliases";
+  test.initial = {33}; // Runtime shift for signed literal source tests.
+  test.expected = test.initial;
+  auto &code = test.code;
+  AppendVMovU32(&code, 30, 0);
+  AppendBufferLoadDword(&code, 1, 30);
+  code.push_back(EncodeVop1(0x02, 22, Vgpr(1)));
+  size_t instructions = 0;
+  const auto check_result = [&](u32 dst, u32 src0, u32 src1, uint64_t value,
+                                u32 count, std::optional<u32> literal = {}) {
+    code.push_back(EncodeSop2(0x23, dst, src0, src1));
+    if (literal) {
+      code.push_back(*literal);
+    }
+    code.push_back(EncodeSMovB32(26, 253));
+    const auto output = static_cast<u32>(test.expected.size());
+    AppendStoreSgprPair(&code, dst, output);
+    AppendStoreSgpr(&code, 26, output + 2u);
+    const auto expected = ReferenceAshrI64(value, count);
+    test.expected.push_back(static_cast<u32>(expected));
+    test.expected.push_back(static_cast<u32>(expected >> 32u));
+    test.expected.push_back(expected != 0 ? 1u : 0u);
+    ++instructions;
+  };
+  for (const u32 literal : {0u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+    const uint64_t value =
+        literal | ((literal & 0x80000000u) != 0 ? 0xffffffff00000000ull : 0ull);
+    for (const u32 count : {0u, 1u, 31u, 32u, 63u, 64u}) {
+      check_result(24, 255, InlineU32(count), value, count, literal);
+    }
+    check_result(24, 255, 22, value, 33, literal);
+  }
+  for (const u32 source : {128u, 129u, 192u, 193u, 208u, 125u}) {
+    const uint64_t value = source == 125u   ? 0ull
+                           : source <= 192u ? source - 128u
+                                            : uint64_t{192} - source;
+    for (const u32 count : {0u, 1u, 32u, 63u}) {
+      check_result(24, source, InlineU32(count), value, count);
+    }
+  }
+  for (const u32 scc : {0u, 1u}) {
+    // SCC may be either source and must be read before it is overwritten.
+    code.push_back(EncodeSopc(0x06, InlineU32(scc), InlineU32(1)));
+    check_result(24, 253, InlineU32(1), scc, 1);
+    AppendSMovLiteral(&code, 20, 1);
+    AppendSMovLiteral(&code, 21, 0);
+    code.push_back(EncodeSopc(0x06, InlineU32(scc), InlineU32(1)));
+    check_result(24, 20, 253, 1, scc);
+  }
+  constexpr uint64_t value = 0xfedcba9889abcdefull;
+  for (const u32 count : {0u, 1u, 31u, 32u, 33u, 63u, 65u}) {
+    AppendSMovLiteral(&code, 20, static_cast<u32>(value));
+    AppendSMovLiteral(&code, 21, static_cast<u32>(value >> 32u));
+    AppendSMovLiteral(&code, 23, count);
+    check_result(20, 20, 23, value, count); // In-place source/destination pair.
+    for (const u32 count_reg : {24u, 25u}) {
+      AppendSMovLiteral(&code, 20, static_cast<u32>(value));
+      AppendSMovLiteral(&code, 21, static_cast<u32>(value >> 32u));
+      AppendSMovLiteral(&code, count_reg, count);
+      check_result(24, 20, count_reg, value,
+                   count); // Count aliases destination.
+    }
+  }
+  for (const u32 count_reg : {20u, 21u}) {
+    const uint64_t alias_value =
+        count_reg == 20u ? 0x8000000000000021ull : 0x0000002100000001ull;
+    AppendSMovLiteral(&code, 20, static_cast<u32>(alias_value));
+    AppendSMovLiteral(&code, 21, static_cast<u32>(alias_value >> 32u));
+    check_result(20, 20, count_reg, alias_value, 33);
+  }
+  // Both operands may refer to the single literal word in the instruction.
+  check_result(24, 255, 255, 0xffffffffffffffffull, 0xffffffffu, 0xffffffffu);
+  for (const u32 source : {0u, 1u}) {
+    // Discarding the destination must still update SCC and leave M0 untouched.
+    AppendSMovLiteral(&code, 124, 0x5a13abcdu);
+    AppendSMovLiteral(&code, 20, 0);
+    AppendSMovLiteral(&code, 21, source);
+    code.push_back(EncodeSopc(0x06, InlineU32(0), InlineU32(source)));
+    code.push_back(EncodeSop2(0x23, 125, 20, InlineU32(0)));
+    code.push_back(EncodeSMovB32(26, 253));
+    const auto output = static_cast<u32>(test.expected.size());
+    AppendStoreSgpr(&code, 26, output);
+    AppendStoreSgpr(&code, 124, output + 1u);
+    AppendStoreSgprPair(&code, 20, output + 2u);
+    test.expected.insert(test.expected.end(), {source, 0x5a13abcdu, 0, source});
+    ++instructions;
+  }
+  AppendEnd(&code);
+  test.initial.resize(test.expected.size());
+  test.opcodes = {O::BUFFER_LOAD_DWORD,  O::V_READFIRSTLANE_B32,
+                  O::S_MOV_B32,          O::S_CMP_EQ_U32,
+                  O::S_ASHR_I64,         O::V_MOV_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.decoded_counts = {{"S_ASHR_I64", instructions}};
+  test.forbidden_spirv = {"OpTypeInt 64"};
+  return test;
+}
+
+TestCase ScalarAshrI64Masks(u32 wave_size) {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name =
+      wave_size == 64 ? "ScalarAshrI64MasksWave64" : "ScalarAshrI64MasksWave32";
+  auto &code = test.code;
+  struct Case {
+    uint64_t source;
+    u32 count;
+  };
+  constexpr Case cases[] = {
+      {0x8000000100000001ull, 1},  {0x8000000100000001ull, 32},
+      {0x8000000100000001ull, 63}, {0x0000000100000000ull, 0},
+      {0x0000000100000000ull, 32}, {1, 1}};
+  for (const u32 mask_reg : {106u, 126u}) {
+    for (const auto &item : cases) {
+      const auto result = ReferenceAshrI64(item.source, item.count);
+      AppendVMovU32(&code, 1, 1);
+      AppendVMovU32(&code, 2, 0);
+      AppendSMovLiteral(&code, mask_reg, static_cast<u32>(item.source));
+      AppendSMovLiteral(&code, mask_reg + 1u,
+                        static_cast<u32>(item.source >> 32u));
+      code.push_back(
+          EncodeSopc(0x06, InlineU32(0), InlineU32(result != 0 ? 1u : 0u)));
+      code.push_back(
+          EncodeSop2(0x23, mask_reg, mask_reg, InlineU32(item.count)));
+      code.push_back(EncodeSMovB32(20, mask_reg));
+      code.push_back(EncodeSMovB32(21, mask_reg + 1u));
+      code.push_back(EncodeSMovB32(22, 253));
+      if (mask_reg == 106u) {
+        code.push_back(EncodeVop2(0x01, 2, InlineU32(0), 1));
+      } else {
+        code.push_back(EncodeVop1(0x01, 2, InlineU32(1)));
+      }
+      code.push_back(EncodeSop1(0x04, 126, 193)); // Restore EXEC for readback.
+      const u32 expected[] = {static_cast<u32>(result),
+                              static_cast<u32>(result >> 32u),
+                              result != 0 ? 1u : 0u};
+      for (u32 i = 0; i < std::size(expected); ++i) {
+        AppendStoreSgprAtLaneDwordOffset(
+            &code, 20 + i, 0, static_cast<u32>(test.expected.size()));
+        test.expected.insert(test.expected.end(), wave_size, expected[i]);
+      }
+      AppendStoreVgprAtLaneDwordOffset(&code, 2, 0,
+                                       static_cast<u32>(test.expected.size()));
+      for (u32 lane = 0; lane < wave_size; ++lane) {
+        test.expected.push_back(static_cast<u32>((result >> lane) & 1u));
+      }
+    }
+  }
+  AppendEnd(&code);
+  test.initial.resize(test.expected.size());
+  test.opcodes = {O::S_MOV_B32,     O::S_MOV_B64,    O::S_CMP_EQ_U32,
+                  O::S_ASHR_I64,    O::V_MOV_B32,    O::V_CNDMASK_B32,
+                  O::V_LSHLREV_B32, O::V_ADD_NC_U32, O::BUFFER_STORE_DWORD,
+                  O::S_ENDPGM};
+  test.decoded_counts = {{"S_ASHR_I64 vcc_lo, vcc_lo", std::size(cases)},
+                         {"S_ASHR_I64 exec_lo, exec_lo", std::size(cases)}};
+  test.forbidden_spirv = {"OpTypeInt 64"};
+  test.compute_info.threads_num[0] = wave_size;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.wave_size = wave_size;
+  test.has_compute_info = true;
+  return test;
+}
 TestCase ScalarConditionalMoveB64() {
   using O = ShaderOpcode;
   TestCase test;
@@ -25045,6 +25348,34 @@ TestCase ImageSampleAndGather() {
   return test;
 }
 
+TestCase ImageGatherLodApproximatesLevelZero() {
+  using O = ShaderOpcode;
+  std::vector<u32> code;
+  AppendVMovLiteral(&code, 20, 0x3f000000u);
+  AppendVMovLiteral(&code, 21, 0x3f000000u);
+  AppendVMovLiteral(&code, 22, 0x3f800000u);
+  code.push_back(EncodeMimg0(0x44, 0x1));
+  code.push_back(EncodeMimg1(0, 20));
+  code.push_back(EncodeMimg0(0x24, 0x1));
+  code.push_back(EncodeMimg1(4, 20));
+  for (u32 i = 0; i < 5u; i++) {
+    AppendStoreVgpr(&code, i, i);
+  }
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "ImageGatherLodApproximatesLevelZero";
+  test.code = std::move(code);
+  test.opcodes = {O::V_MOV_B32, O::IMAGE_GATHER4_L, O::IMAGE_SAMPLE,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  // Explicit sampling proves mip 1 is accessible; the gather must still read mip 0.
+  test.expected = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x41000000u};
+  test.sampled_image_rgba_mips = {std::vector<u32>(4 * 4 * 4, 0x3f800000u),
+                                 std::vector<u32>(2 * 2 * 4, 0x41000000u)};
+  test.required_spirv = {"OpImageGather", "OpImageSampleExplicitLod"};
+  return test;
+}
+
 TestCase ImageD16GatherPacksHalfPairs() {
   using O = ShaderOpcode;
 
@@ -26369,6 +26700,11 @@ std::vector<TestCase> MakeCases() {
   AddCase(ScalarBfeI32CapturedRawSignExtends);
   AddCase(BitfieldExtractWidthPastEndEdges);
   AddCase(Scalar64BitOps);
+  cases.push_back(ScalarAshrI64Edges(false));
+  cases.push_back(ScalarAshrI64Edges(true));
+  AddCase(ScalarAshrI64OperandsAndAliases);
+  cases.push_back(ScalarAshrI64Masks(32));
+  cases.push_back(ScalarAshrI64Masks(64));
   AddCase(VectorDynamicU64ShiftEdges);
   AddCase(ScalarConditionalMoveB64);
   AddCase(ScalarConditionalMoveB64PreservesMasks);
@@ -26621,6 +26957,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(ImageGetResinfoDmaskWidthHeight);
   AddCase(ImageGetResinfoDmaskMipLevels);
   AddCase(ImageSampleAndGather);
+  AddCase(ImageGatherLodApproximatesLevelZero);
   AddCase(ImageD16GatherPacksHalfPairs);
   AddCase(ImageSampleA16SamplerCoordsOnGpu);
   AddCase(ImageSampleOpcodeAliasUsesNormalCoords);
@@ -31133,6 +31470,15 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--s-ashr-i64-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, ScalarAshrI64Edges(false));
+    RunCase(&vulkan, ScalarAshrI64Edges(true));
+    RunCase(&vulkan, ScalarAshrI64OperandsAndAliases());
+    RunCase(&vulkan, ScalarAshrI64Masks(32));
+    RunCase(&vulkan, ScalarAshrI64Masks(64));
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--tessellation-only") == 0) {
     CheckTessellationPrograms();
     CheckEmbeddedFetchVertexOffset();
@@ -31212,6 +31558,7 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, BranchVccnzUsesWaveMask());
     RunCase(&vulkan, BranchVccnzUsesCarryProducedWaveMask());
     RunCase(&vulkan, ImageSampleAndGather());
+    RunCase(&vulkan, ImageGatherLodApproximatesLevelZero());
     RunCase(&vulkan, SharedReturnKeepsSelectedValues());
     return 0;
   }
