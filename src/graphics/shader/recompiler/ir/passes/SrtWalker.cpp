@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <fmt/format.h>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -330,9 +331,8 @@ public:
 						                        (op == ValueOpcode::ReadConstBuffer &&
 						                         kind == ResourceKind::ScalarAddress);
 						if (crosswired) {
-							Fail(flags.pc,
-							     fmt::format("{} has incompatible scalar memory metadata",
-							                 ValueOpcodeName(op)));
+							Fail(flags.pc, fmt::format("{} has incompatible scalar memory metadata",
+							                           ValueOpcodeName(op)));
 						}
 					}
 				}
@@ -457,8 +457,41 @@ private:
 	std::vector<Patch> m_patches;
 };
 
+// Per-thread memo storage for Evaluator. Materialization runs for every draw and dispatch, so the
+// memo must not allocate: values are indexed by Inst::EvaluationIndex and validated by a
+// generation stamp instead of being cleared.
+struct EvaluatorScratch {
+	std::vector<uint64_t> values;
+	std::vector<uint32_t> stamps;
+	uint32_t              generation = 0;
+
+	void Begin(size_t size) {
+		if (values.size() < size) {
+			values.resize(size);
+			stamps.resize(size, 0u);
+		}
+		if (++generation == 0u) {
+			std::ranges::fill(stamps, 0u);
+			generation = 1u;
+		}
+	}
+};
+
+std::vector<std::unique_ptr<EvaluatorScratch>>& EvaluatorScratchPool() {
+	thread_local std::vector<std::unique_ptr<EvaluatorScratch>> pool;
+	return pool;
+}
+
 class Evaluator {
 public:
+	~Evaluator() {
+		if (m_scratch != nullptr) {
+			EvaluatorScratchPool().push_back(std::move(m_scratch));
+		}
+	}
+	Evaluator(const Evaluator&)            = delete;
+	Evaluator& operator=(const Evaluator&) = delete;
+
 	Evaluator(const ResourcePlan& program, const SrtRuntime& runtime,
 	          std::span<const uint8_t> clean_flat_slots = {}, Evaluator* clean_evaluator = nullptr,
 	          Value active_mask = {})
@@ -499,15 +532,29 @@ private:
 			return false;
 		}
 		if (!m_reserved) {
-			m_cache.reserve(m_program.value_storage.size());
-			m_visiting.reserve(m_program.value_storage.size());
+			auto& pool = EvaluatorScratchPool();
+			if (pool.empty()) {
+				m_scratch = std::make_unique<EvaluatorScratch>();
+			} else {
+				m_scratch = std::move(pool.back());
+				pool.pop_back();
+			}
+			m_scratch->Begin(m_program.value_storage.size());
+			m_visiting.reserve(64);
 			m_reserved = true;
 		}
+		const auto index = inst->EvaluationIndex();
+		const bool dense = index < m_scratch->values.size();
 		if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) &&
 		    inst->NumArgs() == 3 && inst->Arg(0).Resolve() == m_active_mask) {
 			return EvaluateWide(inst->Arg(1), result);
 		}
-		if (const auto found = m_cache.find(inst); found != m_cache.end()) {
+		if (dense) {
+			if (m_scratch->stamps[index] == m_scratch->generation) {
+				result = m_scratch->values[index];
+				return true;
+			}
+		} else if (const auto found = m_cache.find(inst); found != m_cache.end()) {
 			result = found->second;
 			return true;
 		}
@@ -515,13 +562,18 @@ private:
 			return false;
 		}
 		m_visiting.push_back(inst);
-		uint64_t out = 0;
+		uint64_t   out       = 0;
 		const bool evaluated = EvaluateInst(*inst, out);
 		m_visiting.pop_back();
 		if (!evaluated) {
 			return false;
 		}
-		m_cache.emplace(inst, out);
+		if (dense) {
+			m_scratch->values[index] = out;
+			m_scratch->stamps[index] = m_scratch->generation;
+		} else {
+			m_cache.emplace(inst, out);
+		}
 		result = out;
 		return true;
 	}
@@ -972,6 +1024,7 @@ private:
 	Evaluator*                                m_clean_evaluator = nullptr;
 	Value                                     m_active_mask;
 	std::unordered_map<const Inst*, uint64_t> m_cache;
+	std::unique_ptr<EvaluatorScratch>         m_scratch;
 	std::vector<const Inst*>                  m_visiting;
 	bool                                      m_reserved = false;
 };
@@ -1062,7 +1115,7 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 			}
 		}
 	}
-	results = std::move(evaluated);
+	results        = std::move(evaluated);
 	active_sources = std::move(active);
 	if (evaluate_flat) {
 		flat = std::move(flattened);
@@ -1086,7 +1139,7 @@ void BuildSrtPlan(Program& program) {
 }
 
 bool EvaluateUniformValues(const ResourcePlan& program, std::span<const Value> values,
-                            const SrtRuntime& runtime, std::span<uint32_t> results) {
+                           const SrtRuntime& runtime, std::span<uint32_t> results) {
 	if (values.size() != results.size()) {
 		return false;
 	}

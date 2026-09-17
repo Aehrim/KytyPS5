@@ -1087,6 +1087,10 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		MarkCleanFlatSlots(plan, Source(plan, source->indirect_image->heap_source),
 		                   plan.clean_flat_slots);
 	}
+	uint32_t evaluation_index = 0;
+	for (auto& inst: plan.value_storage) {
+		inst.SetEvaluationIndex(evaluation_index++);
+	}
 	return plan;
 }
 

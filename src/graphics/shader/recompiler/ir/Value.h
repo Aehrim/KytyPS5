@@ -129,6 +129,11 @@ public:
 	void ReplaceOpcode(ValueOpcode opcode);
 	void Invalidate();
 
+	// Dense index inside a ResourcePlan; lets the runtime evaluator memoize into a flat array.
+	static constexpr uint32_t NoEvaluationIndex = UINT32_MAX;
+	[[nodiscard]] uint32_t    EvaluationIndex() const { return evaluation_index; }
+	void                      SetEvaluationIndex(uint32_t index) { evaluation_index = index; }
+
 	template <typename T>
 	requires(sizeof(T) <= sizeof(uint64_t) && std::is_trivially_copyable_v<T>)
 	[[nodiscard]] T Flags() const {
@@ -151,7 +156,8 @@ private:
 
 	ValueOpcode         opcode;
 	uint64_t            flags;
-	Block*              parent = nullptr;
+	uint32_t            evaluation_index = NoEvaluationIndex;
+	Block*              parent           = nullptr;
 	std::vector<Value>  args;
 	std::vector<Block*> phi_blocks;
 	std::vector<Use>    uses;
