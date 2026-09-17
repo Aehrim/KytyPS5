@@ -530,6 +530,34 @@ Vulkan-Aufzeichnen) und Descriptor-Sets/Bindings über Befehle hinweg cachen.
 **Arbeitsregel (zweimal an einem Tag verletzt):** vor `git checkout -- <datei>` immer `git diff --stat` ansehen;
 Experimente vor dem Einbau temporärer Stoppuhren committen oder stashen.
 
+**Upstream-Merge 2026-09-17 abends (`ffbd3c9`):** `upstream/main` bis `104530e` (15 Commits, u. a. Entfernen der
+zusätzlichen Virtual-Memory-Schicht, `ByteBuffer` → `std::vector`, SNORM16-Kodierung für formatierte Stores). Zwei
+Konflikte: `spirvEmitterMemory.cpp` (upstream hat die formatierten Stores umgebaut und SNORM16 ergänzt – unser
+`EncodeFormatComponent` deckt das mit ab und bleibt), `SrtWalker.cpp`. Unit-Tests grün, Lauf 85 startet und rendert;
+erster Start baut den Vulkan-Pipeline-Cache neu auf.
+
+**Sampling-Profiler (`4ee7a53`, `d4fe974`) – und eine Korrektur des Bildes vom „CPU-gebundenen“ Emulator.**
+`KYTY_SAMPLER=1`, **F4** im Fenster: 20 s lang wird der GPU-Thread ~1000×/s angehalten und sein Aufrufstapel notiert
+(`kyty_samples.txt`, Auswertung `tools/sampler_report.py`). Zonen sagen, *wie lange* ein Schritt dauert, Samples sagen,
+*wo darin* die Zeit liegt. Erstes Ergebnis (Lauf 86, mit Hintergrundlast, also nur als Verteilung zu lesen):
+**48 % der Samples stehen in `CommandScheduler::Wait`** – der Thread wartet auf die GPU. Alle Wege führen durch
+`BufferCache::ReadMemory` (Download + `Wait(CurrentTick)` = warten, bis *alles* Eingereichte fertig ist):
+
+| Auslöser | Anteil der Thread-Zeit |
+|---|---|
+| Seitenfehler auf dem GPU-Thread selbst (`HandleFault`) | ~14 % |
+| Lese-Seitenfehler von Spiel-Threads, als Kommando an den GPU-Thread geschickt | ~18 % |
+| `TextureCache::MaterializeDccClear`: DCC-Metadaten wurden von der GPU geschrieben und müssen zur Clear-Erkennung zurückgelesen werden (aus `FindImage`, also mitten in Draws/Dispatches) | ~13,5 % |
+
+Die Tracy-Zonen hatten das versteckt: Die Wartezeit steckt als seltener, langer Ausreißer *in* den Draw-/Dispatch-
+Zonen (Maxima im ms-Bereich) bzw. außerhalb von `CommandProcessor::Process`. **Konsequenz für den Plan:** Vor dem
+Threading-Umbau die GPU-Synchronisationspunkte reduzieren – jeder davon leert die gesamte GPU-Warteschlange und macht
+Parallelität zwischen CPU und GPU zunichte; ein zweiter CPU-Thread würde an denselben Punkten ebenfalls stehen.
+Nächster Schritt: sauberer Lauf ohne Hintergrundlast mit den neuen Zonen (`BufferCache::ReadMemory`,
+`…::WaitGpu`, `TextureCache::DccMetadataReadback`, `RenderContext::HandleFault`, `CommandScheduler::Wait`) → Anzahl
+und Dauer der Waits; dann pro Auslöser entscheiden (DCC-Clear auf der GPU erkennen statt zurücklesen; Fehlzugriffe
+durch Seiten-Mitbewohner vermeiden wie bei `e5ca4d3`; nur auf den Tick des letzten Schreibers warten).
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
