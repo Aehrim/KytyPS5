@@ -558,6 +558,40 @@ Nächster Schritt: sauberer Lauf ohne Hintergrundlast mit den neuen Zonen (`Buff
 und Dauer der Waits; dann pro Auslöser entscheiden (DCC-Clear auf der GPU erkennen statt zurücklesen; Fehlzugriffe
 durch Seiten-Mitbewohner vermeiden wie bei `e5ca4d3`; nur auf den Tick des letzten Schreibers warten).
 
+**Sauberer Lauf ohne Hintergrundlast (Lauf 87) – zwei große Posten, die kein Zonen-Profil gezeigt hatte:**
+GPU-Waits ~23 % der GPU-Thread-Zeit (10k Waits à 0,57 ms in 25 s; mit WoW im Hintergrund sah es nach 48 % aus –
+Aufwecken dauert auf einem ausgelasteten Rechner länger) und **`vkAllocateMemory`/`vkFreeMemory` ~21 %**.
+
+**Image-Pool (`34b5dbf`, Läufe 88–91).** Diagnose mit einem Log, das nur während einer F4-Aufnahme schreibt
+(`image-insert/-free/-delete/-overlap-free`, inkl. Rücksprungadresse → `llvm-symbolizer`). Erste Hypothese
+(Nebel-Volumen wechselt zwischen 3D und 2D-Array) war falsch: kein einziges `ExpandImage`. Tatsächlich legt das Spiel
+seine transienten Render-Targets **überlappend in einem Heap** an (Frame-Graph-Aliasing): die 3840×2160-RGBA16F-Fläche
+(64 MiB) teilt sich Speicher mit einem später im Bild benutzten 2560×1440-Tiefenpuffer usw. Der Cache muss die erste
+Fläche fallen lassen, sobald die zweite angefragt wird – pro Bild acht Neuanlagen an fünf Adressen, dazu ein
+Tiefenpuffer, der viermal pro Bild zwischen D32F- und R32F-Image wechselt. Das Verhalten ist korrekt; teuer war nur,
+dass jede Neuanlage Gerätespeicher anforderte und die Freigabe ihn zurückgab. Jetzt warten freigegebene Images in
+einem begrenzten Pool (64 Einträge, 768 MiB, Alterung nach 512 Freigaben) und werden bei identischem Create-Info
+wieder ausgegeben; der Tiler verwendet seine Scratch-Buffer nach Größe wieder. `KYTY_NO_IMAGE_POOL=1` schaltet ab.
+Gleiche Szene: `Image::Image` 244 µs → 1 µs, `DrawAuto` 283 → 48 µs, **4,2 → 5,5 fps**. Bild laut Sichtprüfung
+unverändert. (Nebenbefund: `NumFramesBeforeRemoval` zählt Scheduler-Ticks, nicht Bilder – bei hunderten Submits pro
+Bild gilt ein Image nach Sekundenbruchteilen als alt.)
+
+**Verbleibende GPU-Waits (Lauf 91, ~29 % der Thread-Zeit):** Lesezugriffe von Spiel-Threads auf GPU-geschriebenen
+Speicher ~14 %, DCC-Metadaten-Rücklesen im Textur-Cache ~6 %, indirekte Dispatches ~5 %, Deskriptor-Auflösung auf
+GPU-geschriebenen Worten ~2,5 %. Versuch (`ecce5d2`): die Paket-Variante mit absoluter Adresse wie die
+Offset-Variante an `vkCmdDispatchIndirect` geben – Waits 29 → 25 %, 5,5 → 5,8 fps. **Zurückgenommen**, weil zeitgleich
+fehlender volumetrischer Nebel auffiel; geblieben ist nur das fault-freie Lesen CPU-geschriebener Zähler über den
+Backing-Store, und F3 schaltet jetzt auch den Host-Indirect-Pfad der Offset-Variante.
+
+**Offen – Nebel (neues Problem 14):** Screenshot direkt nach dem Spawn (Lauf 93, Ortsname eingeblendet) zeigt den
+volumetrischen Nebel mit Lichtkegel; Screenshots ein paar Minuten später (Läufe 92, 94, 95) zeigen ihn nicht.
+Umschalten per F3 im laufenden Spiel ändert nichts, Host-Indirect ist damit sehr wahrscheinlich unschuldig. Arbeits-
+hypothese: Der Nebel ist beim Spawn da und geht nach kurzer Zeit verloren (temporaler Verlaufsspeicher kippt), wie
+beim Schwarzbild nach dem Spawn-Effekt. Nächster Test: nach „Fortsetzen“ ab der ersten Sekunde beobachten, wann und
+wie der Nebel verschwindet (schlagartig/ausblendend, im Stand oder bei Bewegung). **Lehre:** „sieht gleich aus“ reicht
+nicht – für Performance-Änderungen an Compute-Pfaden braucht es einen festen Vergleichs-Screenshot (gleiche Stelle,
+gleicher Zeitpunkt nach dem Spawn). Testsystem laut Fenstertitel: Ryzen 7 5800X, Radeon RX 9060 XT.
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
