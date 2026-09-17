@@ -417,6 +417,16 @@ offenen Programmen lagert Windows aus und ein 2-Flip-Capture dauert > 20 min. Vo
 ggf. `renderDoc.cpp` auf 1 Flip umstellen. Der clang-format-Hook (v22.1.3) formatiert ganze Dateien anders als
 upstream (z. B. `struct A: B`), was die Diffs aufbläht – vor Upstream-PRs Version angleichen.
 
+**Lauf 67 – „Fortsetzen“ als Testweg, Flips sind nicht gleich Welt-fps.** Der Weg Start → Fortsetzen → Welt dauert
+rund eine Minute statt fünf. Der `Present heartbeat` zählt Flips des Spiels, egal welche Szene: Hauptmenü ~40/s,
+Ladebildschirm 16–19/s, Welt 3–7/s, Hauptmenü nach „Speichern und beenden“ 30–35/s. Aufschlussreich ist der
+Durchsatz: Das Menü reicht vor dem Spiel ~105 Submits (`EndOfPipe`) pro Flip ein, danach ~124 – in beiden Fällen
+verarbeitet der CommandProcessor ~4100 Submits/s. Das Menü ist nach dem Beenden also nicht „langsamer emuliert“,
+das Spiel schickt pro Bild schlicht mehr Arbeit, und der eine CP-Thread ist die feste Obergrenze. In der Welt sind es
+~250 Submits pro Flip mit viel teureren Inhalten (6300 Draws). Merksatz: fps immer zusammen mit der Szene und der
+Arbeit pro Bild lesen. Das Speichern selbst (Prepare/SetParam/Commit) kam erst ~100 s nach dem Beenden im Hauptmenü
+an – der Speicher-Job des Spiels läuft asynchron und bei 4 fps entsprechend zäh.
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
