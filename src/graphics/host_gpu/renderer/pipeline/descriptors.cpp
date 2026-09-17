@@ -651,7 +651,23 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			}
 		}
 	}
-	const auto    samples     = multisampled ? 1u << last_level : 1u;
+	const auto samples = multisampled ? 1u << last_level : 1u;
+	if (!multisampled && !volume &&
+	    !TileSupportsTextureLayout(format, width, height, physical_levels, tile)) {
+		// A descriptor whose format and tile mode have no storage layout is garbage read through
+		// a stale table entry (Demon's Souls: 2217x1 k8Srgb, 11 levels); bind the null texture.
+		static std::atomic<uint32_t> layout_log_count {0};
+		if (layout_log_count.fetch_add(1) < 16u) {
+			LOGF("texture without a storage layout bound as null: format=%u extent=%ux%u levels=%u "
+			     "tile=%u addr=0x%016" PRIx64 "\n",
+			     static_cast<uint32_t>(format), width, height, physical_levels,
+			     static_cast<uint32_t>(tile), address);
+		}
+		auto       desc = NullTextureDesc(resource, storage ? TextureCache::BindingType::Storage
+		                                                    : TextureCache::BindingType::Texture);
+		const auto id   = texture_cache.FindImage(desc);
+		return {id, nullptr, std::move(desc)};
+	}
 	const auto    view_levels = multisampled ? 1u : last_level - base_level + 1u;
 	uint32_t      pitch       = 0;
 	TileSizeAlign size {};
