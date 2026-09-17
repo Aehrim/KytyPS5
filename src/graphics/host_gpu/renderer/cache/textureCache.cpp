@@ -264,11 +264,15 @@ ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	if (Common::Sampler::Recording()) {
 		std::fprintf(
 		    stderr,
-		    "image-insert addr=0x%llx size=0x%llx type=%u extent=%ux%ux%u levels=%u layers=%u\n",
+		    "image-insert addr=0x%llx size=0x%llx type=%u extent=%ux%ux%u levels=%u layers=%u "
+		    "fmt=%u guest_fmt=%u tile=%u pitch=%u samples=%u meta=%u caller=%p\n",
 		    static_cast<unsigned long long>(info.data.address),
 		    static_cast<unsigned long long>(info.data.size), static_cast<uint32_t>(info.type),
 		    info.extent.width, info.extent.height, info.extent.depth, info.resources.levels,
-		    info.resources.layers);
+		    info.resources.layers, static_cast<uint32_t>(info.pixel_format),
+		    static_cast<uint32_t>(info.guest_format), static_cast<uint32_t>(info.tile_mode),
+		    info.pitch, info.samples, static_cast<uint32_t>(info.metadata.kind),
+		    __builtin_return_address(0));
 	}
 	m_mutation_epoch.fetch_add(1, std::memory_order_relaxed);
 	if (!info.data.Empty()) {
@@ -324,6 +328,12 @@ void TextureCache::DeleteImage(ImageId id) {
 		return;
 	}
 	m_mutation_epoch.fetch_add(1, std::memory_order_relaxed);
+	if (Common::Sampler::Recording()) {
+		std::fprintf(stderr, "image-delete addr=0x%llx size=0x%llx caller=%p\n",
+		             static_cast<unsigned long long>(image->info.data.address),
+		             static_cast<unsigned long long>(image->info.data.size),
+		             __builtin_return_address(0));
+	}
 	if (!image->depth_id) {
 		std::vector<ImageId> associations;
 		m_slot_images.ForEach([&](ImageId candidate, const Image& associated) {
@@ -358,6 +368,12 @@ void TextureCache::DeleteImage(ImageId id) {
 
 void TextureCache::FreeImage(ImageId id) {
 	auto& image = m_slot_images[id];
+	if (Common::Sampler::Recording()) {
+		std::fprintf(stderr, "image-free addr=0x%llx size=0x%llx caller=%p\n",
+		             static_cast<unsigned long long>(image.info.data.address),
+		             static_cast<unsigned long long>(image.info.data.size),
+		             __builtin_return_address(0));
+	}
 	if (image.IsGpuModified()) {
 		image.ClearGpuModified();
 	}
@@ -847,6 +863,28 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		    (requested.resources == cached.info.resources &&
 		     requested.mip_layout != cached.info.mip_layout)) {
 			if (safe_to_delete) {
+				if (Common::Sampler::Recording()) {
+					std::fprintf(
+					    stderr,
+					    "image-overlap-free branch=%s requested: addr=0x%llx size=0x%llx %ux%ux%u "
+					    "levels=%u layers=%u fmt=%u tile=%u binding=%u | cached: addr=0x%llx "
+					    "size=0x%llx %ux%ux%u levels=%u layers=%u fmt=%u tile=%u age=%llu\n",
+					    "layout", static_cast<unsigned long long>(requested.data.address),
+					    static_cast<unsigned long long>(requested.data.size),
+					    requested.extent.width, requested.extent.height, requested.extent.depth,
+					    requested.resources.levels, requested.resources.layers,
+					    static_cast<uint32_t>(requested.pixel_format),
+					    static_cast<uint32_t>(requested.tile_mode), static_cast<uint32_t>(binding),
+					    static_cast<unsigned long long>(cached.info.data.address),
+					    static_cast<unsigned long long>(cached.info.data.size),
+					    cached.info.extent.width, cached.info.extent.height,
+					    cached.info.extent.depth, cached.info.resources.levels,
+					    cached.info.resources.layers,
+					    static_cast<uint32_t>(cached.info.pixel_format),
+					    static_cast<uint32_t>(cached.info.tile_mode),
+					    static_cast<unsigned long long>(
+					        current_tick - std::min(current_tick, cached.tick_accessed_last)));
+				}
 				FreeImage(cached_id);
 			}
 			return {merged_id};
@@ -915,6 +953,25 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		return {merged_id};
 	}
 	if (requested.data.address >= cached.info.data.address && safe_to_delete) {
+		if (Common::Sampler::Recording()) {
+			std::fprintf(
+			    stderr,
+			    "image-overlap-free branch=%s requested: addr=0x%llx size=0x%llx %ux%ux%u "
+			    "levels=%u layers=%u fmt=%u tile=%u binding=%u | cached: addr=0x%llx "
+			    "size=0x%llx %ux%ux%u levels=%u layers=%u fmt=%u tile=%u age=%llu\n",
+			    "partial", static_cast<unsigned long long>(requested.data.address),
+			    static_cast<unsigned long long>(requested.data.size), requested.extent.width,
+			    requested.extent.height, requested.extent.depth, requested.resources.levels,
+			    requested.resources.layers, static_cast<uint32_t>(requested.pixel_format),
+			    static_cast<uint32_t>(requested.tile_mode), static_cast<uint32_t>(binding),
+			    static_cast<unsigned long long>(cached.info.data.address),
+			    static_cast<unsigned long long>(cached.info.data.size), cached.info.extent.width,
+			    cached.info.extent.height, cached.info.extent.depth, cached.info.resources.levels,
+			    cached.info.resources.layers, static_cast<uint32_t>(cached.info.pixel_format),
+			    static_cast<uint32_t>(cached.info.tile_mode),
+			    static_cast<unsigned long long>(current_tick -
+			                                    std::min(current_tick, cached.tick_accessed_last)));
+		}
 		FreeImage(cached_id);
 	}
 	return {merged_id};
