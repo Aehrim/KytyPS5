@@ -499,6 +499,37 @@ bleibt die Obergrenze. Nächste Kandidaten laut Profil: `Dispatch::BindAndEmit` 
 des Schnellpfads: vorbereitete Bindings bei gleicher Epoche wiederverwenden, Descriptor-Set nicht neu schreiben),
 `PrepareDrawRenderState` bei Epochenwechsel (9,9 µs × 381k = 3,8 s).
 
+**Schnellpfad pro Draw, Etappe 2 (`b5ae3b7`, Lauf 80).** Ein Draw, der den Zustand seines Vorgängers übernimmt, findet
+Pipeline, Descriptor-Sets, Vertexbuffer, dynamischen Zustand und den Render-Pass noch im Vulkan-Befehlspuffer
+gebunden. Er holt nur noch seinen Indexbuffer und setzt den Draw ab (`Draw::Repeat`, 0,2 µs). Bedingungen: gleiche
+GPU-State-Epoche, gleicher Scheduler-Tick (kein Submit dazwischen), unveränderte Buffer-Registrierungen und
+unveränderter Textur-Cache (neue `TextureCache::MutationEpoch`), Render-Pass noch mit identischem `RenderState` offen
+(`CommandBuffer::IsRenderingWith` – ein Neustart würde Clear-Attachments erneut löschen), gleiche Topologie und
+Primitive-Restart, kein Mesh-Shader, keine Buffer-Schreibzugriffe aus Shadern; alles wird nach dem Holen des
+Indexbuffers erneut geprüft, weil das Hochladen Buffer anlegen oder submitten kann. Speicher-Unmaps zählen jetzt
+ebenfalls die GPU-State-Epoche hoch. A/B im selben Lauf: **18,4 → 10,5 µs pro Draw** (beide Etappen zusammen), im
+Profil nehmen 445k von 831k Draws den kurzen Weg. Bild laut Sichtprüfung unverändert.
+
+**Inkrementeller BDA-Abgleich (`7fe6b0d`, Läufe 81–83).** `PrepareBda` lief vor jedem DMA-Dispatch über alle Buffer,
+sobald *irgendeine* Seite CPU-dirty geworden oder *irgendein* Buffer registriert worden war – im laufenden Spiel
+praktisch immer (26k Durchläufe à ~45 µs, einzelne mehrere hundert µs). Jetzt protokolliert der `RegionManager` die
+CPU-dirty gewordenen Bereiche (`CpuDirtyLog`, 512 Einträge) und der Buffer-Cache neu registrierte Buffer; abgeglichen
+werden nur diese. Voller Durchlauf nur noch nach Mapping-Änderungen oder Protokoll-Überlauf. Zähler aus Lauf 82: pro
+Abgleich ~1 Bereich, Überlauf < 1 %. `Dispatch::PrepareBda` 1,19 s → 0,61 s pro 25 s; der Rest sind echte Uploads
+(Ausreißer bis 12 ms).
+
+**Stand am Abend (Lauf 84, Tunnel, 25 s):** 128–134 Presents = **5,1–5,4 fps**, `DrawIndex` 11,5 µs,
+`DispatchDirect` 16,4 µs. Der Dispatch-Pfad ist jetzt vollständig in Zonen zerlegt: `GetComputeProgram` 3,7 µs,
+`PrepareBindings` 2,1, `FindBuffers` 1,2, `PrepareBda` 1,7 (Mittel), `RebindBuffers` 4,1, `CommitBindings` 1,0,
+Vulkan-Aufrufe 1,1 – kein einzelner großer Brocken mehr, sondern viele Schritte um 1–4 µs, die jeweils echte Arbeit
+tun (Buffer suchen, synchronisieren, Konstanten hochladen, Descriptor-Set schreiben). **Folgerung:** Die
+Einzel-Optimierungen im Command-Processor-Thread sind weitgehend ausgereizt (3,8 → ~5,3 fps an einem Tag); der nächste
+große Hebel ist strukturell – Arbeit auf mehrere Threads verteilen (Dekodieren/Deskriptoren auflösen getrennt vom
+Vulkan-Aufzeichnen) und Descriptor-Sets/Bindings über Befehle hinweg cachen.
+
+**Arbeitsregel (zweimal an einem Tag verletzt):** vor `git checkout -- <datei>` immer `git diff --stat` ansehen;
+Experimente vor dem Einbau temporärer Stoppuhren committen oder stashen.
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 

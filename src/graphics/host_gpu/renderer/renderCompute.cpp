@@ -397,8 +397,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	}();
 	KYTY_PROFILER_BLOCK("Dispatch::BindAndEmit");
-	auto bindings = PrepareBindings(input_info.stage);
-	FindBuffers(bindings);
+	auto bindings = [&] {
+		KYTY_PROFILER_BLOCK("Dispatch::PrepareBindings");
+		return PrepareBindings(input_info.stage);
+	}();
+	{
+		KYTY_PROFILER_BLOCK("Dispatch::FindBuffers");
+		FindBuffers(bindings);
+	}
 	if (program.info.uses_dma) {
 		KYTY_PROFILER_BLOCK("Dispatch::PrepareBda");
 		m_context.PrepareBda();
@@ -407,10 +413,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		KYTY_PROFILER_BLOCK("Dispatch::RebindImages");
 		RebindImages(bindings);
 	}
-	RebindBuffers(bindings);
+	{
+		KYTY_PROFILER_BLOCK("Dispatch::RebindBuffers");
+		RebindBuffers(bindings);
+	}
 	vk::Buffer indirect_buffer = nullptr;
 	uint64_t   indirect_offset = 0;
 	if (host_indirect) {
+		KYTY_PROFILER_BLOCK("Dispatch::IndirectArgs");
 		const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 		    indirect_args, 3u * sizeof(uint32_t), false, false);
 		indirect_buffer = args_buffer->Handle();
@@ -419,8 +429,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	auto              vk_buffer        = buffer.Handle();
 	PreparedBindings* descriptor_stage = &bindings;
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	{
+		KYTY_PROFILER_BLOCK("Dispatch::CommitBindings");
+		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+		               std::span {&descriptor_stage, 1u});
+	}
 	bool has_storage_writes = HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =
 	    std::any_of(program.info.images.begin(), program.info.images.end(),
