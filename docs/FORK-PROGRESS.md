@@ -317,6 +317,41 @@ Emulator ist **CPU-gebunden im Command-Processor-Thread**, die GPU wartet.
 (Faktor ~25). Die instrumentierten Teilschritte erklären nur ~11 der 45 µs pro Draw; der Rest (Deskriptor-
 Materialisierung/`SrtWalker`, Textur-Auflösung, Vulkan-Aufrufe, Speicher-Tracking) braucht feinere Zonen.
 
+**Feinprofil (Lauf 45, Zonen aus `7fe86b6`):** Draw 40 µs, davon `RefreshShaders` 26 µs, davon
+`MaterializeResources` 25 µs (VS 17 + PS 8); Dispatch 52 µs, davon `MaterializeResources` 26 µs, Binden/Absetzen 26 µs.
+`MaterializeResources` = **47 % der gesamten Command-Processor-Zeit** – der Emulator läuft für jeden Draw/Dispatch
+den kompletten Deskriptor-Graphen des Shaders ab (SRT-Zeiger, Tabellen, *und* alle Shader-Konstanten fürs
+`flattened_srt`).
+
+| Schritt | Commit | Wirkung |
+|---|---|---|
+| Geprüfter Memo für `MaterializeResources` (gelesene Guest-Worte mitschneiden, bei gleichen User-Data per Vergleich validieren; 256 Einträge/Shader, gehasht) | `31ecde1` | Trefferquote im Tunnel 58 % (PS 72 %, VS 53 %, CS ~2–10 %); Draw 40 → 30 µs. Grenze: der Snapshot enthält auch Konstanten (Matrizen), die sich pro Draw/Bild ändern → 16 % „Speicher geändert“, 26 % „andere User-Data“ |
+| Evaluator ohne Allokationen (dichter `EvaluationIndex` pro Plan-Instruktion, gepoolte Arrays mit Generationsstempel statt `unordered_map` pro Aufruf) | `90005a4` | Materialisierung ~25 % schneller (CS 30,7 → 22,2 µs, VS 20,6 → 16,1 µs) |
+
+Messung mit temporären Stoppuhren (nicht committet): **94–96 % der Materialisierungszeit liegen in
+`EvaluateRuntimeSources`** (rekursiver Baum-Interpreter, ~40–60 rohe Speicherlesungen und einige hundert
+IR-Knoten pro Aufruf); Snapshot-Aufbau und `BuildResourceSpecialization` je nur 1–3 %. Geprüfte („clean“) Lesungen
+spielen keine Rolle (≈ 0–1 pro Aufruf). fps bisher unverändert ~2,2 – der große Hebel steht noch aus:
+
+**Plan (nächster Performance-Schritt), zwei Varianten:**
+1. *Adressplan-Memo:* beim Aufzeichnen unterscheiden zwischen **strukturellen** Lesungen (Wert fließt als Operand
+   in Adressen, Bedingungen, Deskriptoren) und **Blatt-Lesungen** (Wert landet nur in einem Ausgabeslot). Bei einem
+   Treffer nur die strukturellen Lesungen vergleichen, die Blatt-Adressen direkt neu lesen und
+   `BuildResourceSpecialization` (billig) neu laufen lassen. Erwartung: Trefferquote nahe 100 %, Kosten ~1–2 µs.
+2. *Linearer Auswerter:* den Plan einmal in ein topologisch sortiertes Band übersetzen (vorverdrahtete
+   Operanden-Indizes), Auswertung als Schleife ohne Rekursion/Visiting-Liste.
+Variante 1 verspricht mehr, Variante 2 ist unabhängig davon sinnvoll. Danach: `Dispatch::BindAndEmit` (26 µs),
+`CpOpDispatchIndirect` (224 µs), Image-Erzeugung (0,5 ms pro Stück, ~100/s).
+
+**Weitere Fixes dieser Runde** (`a5b52e8`): Upload-Quelle mit entmapptem Ende (Absturz in `memcpy`, Lauf 50) → nur
+den gemappten Teil kopieren; 561-MiB-Image-Upload aus unplausiblem Deskriptor (Lauf 52) → Upload überspringen.
+
+**Schwarz nach dem Reinladen – Stand:** intermittierend; laut Beobachtung ausgelöst durch den **Spawn-Effekt** (weißes
+Aufleuchten beim Erscheinen), **Menü auf/zu stellt das Bild wieder her** (Spiel setzt die Verlaufsspeicher zurück).
+Gemessen (Lauf 37): HDR-Target RGB = NaN. Nächster Schritt dafür: `--rd`, F1 direkt beim Spawn, zweites F1 beendet,
+`rd_nanscan.py`. **Speichern und beenden hängt** (Lauf 49: Bild schwarz, keine SaveData-Aufrufe, Spiel präsentiert
+weiter) – kein Spielstand, „Fortsetzen“ daher noch nicht möglich; braucht einen Lauf mit Funktions-Log.
+
 **RenderDoc-Praxis:** Mit `--rd` belegt der Emulator in der Welt 22–24 GB statt ~10 GB; bei 32 GB RAM und weiteren
 offenen Programmen lagert Windows aus und ein 2-Flip-Capture dauert > 20 min. Vor Captures alles schließen;
 ggf. `renderDoc.cpp` auf 1 Flip umstellen. Der clang-format-Hook (v22.1.3) formatiert ganze Dateien anders als
