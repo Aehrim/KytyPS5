@@ -200,6 +200,44 @@ Instruktion finden. Werkzeuge: `rd_overview.py`, `rd_passes.py`, `rd_dump.py` (P
     Ob das der Fix oder die bekannte Video-/Textur-Flakiness (Problem 5) ist, klärt ein A/B-Lauf mit revertiertem
     Commit – **erster Punkt der nächsten Sitzung.**
 
+19. **A/B-Test DX10-Clamp** (Läufe 27 ohne / 28 mit `90917f7`, sonst identische Binaries): beide zeigen dasselbe
+    Bild (HUD korrekt, Welt in Reinfarben Magenta/Rot/Blau/Grün/Schwarz = NaN pro Farbkanal). Der Clamp-Commit ist
+    also **nicht** schuld am Schwarz von Lauf 25 (das war Problem 5), behebt die Farben aber auch nicht. Bleibt drin
+    (korrekte Semantik).
+20. **Mip-View jenseits von `MAX_MIP`** (`descriptors.cpp`, Lauf 26, Absturz beim Laden des Tutorial-Tunnels):
+    T# 512×1024 mit `base=2 last=10 max=0`. `MAX_MIP` kann den Speicher nicht beschreiben, wenn der View dahinter
+    beginnt; weil Mips **kleinste zuerst** im Speicher liegen (`TileGetTiledTextureLayout`: Mip 0 liegt hinten),
+    bestimmt die Level-Zahl die Adresse jedes Mips. → In diesem Fall zählt die Level-Zahl des Views (`last + 1`)
+    statt Abbruch; Format und Adresse werden geloggt. In den Läufen 27–30 nicht erneut getroffen (Streaming-Timing).
+    Auffällig im selben Log: RGBA16F-Textur 8192×128 (Render-Target-Tiling, 2 Adressen) mit gleitenden Mip-Fenstern
+    1–4 / 2–5 / 3–6 bei `max=3` – vermutlich Reflexions-Probe-Atlas (64 × 128²); der bestehende Clamp schneidet dort
+    Level ab (offen).
+21. **NaN-Quelle eingegrenzt: GI-Probes im Nebel-Lichtshader** (RenderDoc-Capture Lauf 24, Skripte `rd_fog.py`,
+    `rd_fogcmp.py`, `rd_bufdump.py`, `rd_bufevo.py`; Diagnose-Läufe 29/30):
+    - Das gerenderte Nebel-Array (214×120, 72 Layer) ist sauber (0 NaN, Werte 0–0,08). Die 3D-Volumen (History
+      `1014`, Ausgabe `119301`, Filter `119304`) sind zu 97 % NaN und enthalten negative Radianz.
+    - Der Nebel-Lichtshader (CS `0xf0dc79c3467d5e0b`, 3122 Instruktionen, Dispatch 129471 im Capture) erzeugt
+      **selbst** neue NaNs: 14 975 Voxel mit sauberer History und NaN-Ausgabe, fast nur in RGB. Die temporale
+      Rückkopplung verteilt sie danach über das ganze Volumen.
+    - Quelle im Shader: GI-Probe-Interpolation (8 Nachbarn, Oktaeder-Sichtbarkeitstest gegen D16-Atlas 384²×360):
+      `BUFFER_LOAD_DWORD id ← s40[cluster*8+corner]`, `BUFFER_LOAD_FORMAT_X w ← s12[id]`,
+      `BUFFER_LOAD_FORMAT_XYZ rgb ← s8[id*2]`. Deskriptoren (Diagnose Lauf 30): s12 = Format 56 (RGBA8 UNorm,
+      Stride 4), s8 = **Format 71 (RGBA16 Float, Stride 8)**, Swizzle Identität.
+    - Der Inhalt von s8 (1,47 MB = 92 160 Probes × 16 Byte) ist **byteidentisch mit Abschnitten der Dateien
+      `globalillumination/worlds/.../*.cgpd`** (971 184 Byte am Stück aus `tower_end_11b05752.cgpd`). Statistik der
+      Daten: alle 16 Bit gleichverteilt (auch die Exponent-Bits), räumlich korreliert (r ≈ 0,6), viertes u16 meist 0
+      → das sind **16-Bit-Integer (UNorm/SNorm-artig), keine Half-Floats**. Als Half dekodiert ergeben sie negative
+      Werte, Riesenwerte und NaN – genau unser Bild. `NaN × Gewicht 0` bleibt NaN.
+    - Ausgeschlossen: falscher Buffer gebunden (Größen 92 160 × 4 / × 16 passen), Min/Max-NaN-Semantik (upstream
+      korrekt), unausgerichtete Sub-Word-Loads (Host bricht ab), 2D-Array↔3D-Alias (Volumen werden von Compute
+      beschrieben), Subgroup-Größe (64 angefordert und unterstützt).
+    - **Offen:** Warum deklariert das Spiel Half-Float für Daten, die keine sind? Kandidaten: (a) Dump mischt
+      Daten und eboot verschiedener Versionen (Spiel-Log: `BuildVersion=2025-10-15`), (b) ein CPU-seitiger
+      Dekodierschritt fehlt/läuft über eine falsche HLE-Funktion, (c) virtuelles Remapping (AMM) zeigt auf die
+      Rohdaten statt auf dekodierte Seiten, (d) Format-Semantik formatierter Buffer-Loads weicht ab.
+    - RenderDoc-Hinweise: `DebugThread` stürzt bei Compute-Shadern mit Subgroup-Ops ab (Segfault) → Speicherinhalte
+      analysieren; Skripte mit `os._exit(0)` beenden (Replay-Shutdown hängt sonst minutenlang).
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
@@ -215,8 +253,8 @@ ohne Verdrängung; für längere Sessions relevant.
 | 6 | `k16UScaled`-Texturen werden als Null gebunden (`ab1a305`); Shader-seitige Konvertierung (als `R16_UINT` sampeln, `OpConvertUToF`) fehlt | offen |
 | 7 | Depth-Feedback-Pässe laufen ohne Layout-Übergang (`541d11f`); Bildqualität dieser Pässe (Nebel, Partikel) unklar | offen |
 | 8 | Indexed-Tables mit unbeschränktem Index nutzen ein festes 32-Einträge-Budget (`2ee0ab1`); Einträge jenseits der echten Tabelle werden genullt, Indizes ≥ 32 fallen auf Kandidat 0 zurück | akzeptiert, beobachten |
-| 9 | **Lauf 25 komplett schwarz** (Logo, Menü, HUD, Welt) trotz laufendem Spiel – erster Lauf mit dem DX10-Clamp-Fix `90917f7`. A/B-Test nötig: Fix revertieren → Bild wieder da? Falls ja, Emission prüfen (`OpFUnordNotEqual`/`OpSelect` sind syntaktisch wie im restlichen Emitter). Falls nein → Problem 5. | **nächste Sitzung zuerst** |
-| 10 | NaN-Ursprung im Nebel: selbst wenn der Clamp-Fix greift, ist die *erste* NaN-Quelle im Nebel-Integrator (Dispatch 1204, liest Vorframe-Volumen, Cluster-Gitter 27×15×9, 214×120 R16F, BC1 64×64) nicht identifiziert. Werkzeug: RenderDoc `DebugThread` auf diesen Dispatch (Frame-1-Event noch zu bestimmen; Pixel-Debug am layered Nebel-Draw 156142 liefert „no trace“). | offen |
+| 9 | ~~Lauf 25 komplett schwarz~~ – A/B-Test (Läufe 27/28): `90917f7` ist unschuldig, Ursache war Problem 5 | erledigt |
+| 10 | **NaN-Ursprung: GI-Probe-Tabelle** (s8 des Nebel-Lichtshaders `0xf0dc79c3467d5e0b`) enthält rohe `.cgpd`-Dateidaten (16-Bit-Integer), wird aber laut Deskriptor als RGBA16F gelesen → Müll/NaN (Meilenstein 21). Nächster Schritt: klären, wer den Buffer füllt (CPU-Pfad, Datei-I/O, AMM-Remap) und ob die Daten zur eboot-Version passen | in Arbeit |
 | 11 | Albedo-Texturen (BC1 2048², Material-Pass 174246) liefern an Mip 0 Nullen – bei gestreamten Texturen evtl. nur Mip 0 nicht resident; auf residentem Mip nachprüfen (`rd_probe.py` mit Mip 3–5). | offen |
 
 ## Geplante Themen
