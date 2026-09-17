@@ -22,7 +22,10 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
@@ -95,6 +98,75 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 	return value != nullptr &&
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
+}
+
+// Resource materialization is a pure function of the user data and of the guest words it reads.
+// Recording those words lets a later draw with the same user data revalidate a stored result
+// with a few compares instead of walking the descriptor graph again.
+struct MaterializeMemoStats {
+	std::atomic<uint64_t> lookups {0};
+	std::atomic<uint64_t> hits {0};
+	std::atomic<uint64_t> user_data_misses {0};
+	std::atomic<uint64_t> read_misses {0};
+	std::atomic<uint64_t> unrecordable {0};
+	std::atomic<uint64_t> recorded_reads {0};
+	std::atomic<uint64_t> recorded {0};
+};
+MaterializeMemoStats g_memo_stats;
+
+struct MaterializeRead {
+	uint64_t address = 0;
+	uint32_t value   = 0;
+	bool     clean   = false;
+
+	bool operator==(const MaterializeRead&) const = default;
+};
+
+struct MaterializeRecorder {
+	std::vector<MaterializeRead> reads;
+	bool                         failed = false;
+};
+
+bool RecordRawGuestRead(void* userdata, uint64_t address, uint32_t* value) {
+	// Same semantics as the SRT walker's direct read when no reader is installed.
+	std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+	static_cast<MaterializeRecorder*>(userdata)->reads.push_back({address, *value, false});
+	return true;
+}
+
+bool RecordCleanGuestRead(void* userdata, uint64_t address, uint32_t* value) {
+	auto* recorder = static_cast<MaterializeRecorder*>(userdata);
+	if (!ReadShaderGuestMemory(nullptr, address, value)) {
+		recorder->failed = true;
+		return false;
+	}
+	recorder->reads.push_back({address, *value, true});
+	return true;
+}
+
+void ReportMaterializeMemoStats() {
+	static const bool enabled = std::getenv("KYTY_MEMO_STATS") != nullptr;
+	if (!enabled) {
+		return;
+	}
+	static auto last = std::chrono::steady_clock::now();
+	const auto  now  = std::chrono::steady_clock::now();
+	if (now - last < std::chrono::seconds(10)) {
+		return;
+	}
+	last                = now;
+	const auto recorded = g_memo_stats.recorded.exchange(0);
+	LOGF("materialize memo: lookups=%" PRIu64 " hits=%" PRIu64 " user_data_miss=%" PRIu64
+	     " read_miss=%" PRIu64 " unrecordable=%" PRIu64 " reads_per_record=%" PRIu64 "\n",
+	     g_memo_stats.lookups.exchange(0), g_memo_stats.hits.exchange(0),
+	     g_memo_stats.user_data_misses.exchange(0), g_memo_stats.read_misses.exchange(0),
+	     g_memo_stats.unrecordable.exchange(0),
+	     g_memo_stats.recorded_reads.exchange(0) / std::max<uint64_t>(recorded, 1));
+}
+
+bool MaterializeMemoEnabled() {
+	static const bool enabled = std::getenv("KYTY_NO_MATERIALIZE_MEMO") == nullptr;
+	return enabled;
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
@@ -200,8 +272,76 @@ struct PipelineCache::ProgramCache {
 			permutations.reserve(8);
 		}
 
+		struct Memo {
+			std::vector<uint32_t>                        user_data;
+			uint64_t                                     key         = 0;
+			uint64_t                                     shader_base = 0;
+			std::vector<MaterializeRead>                 reads;
+			ShaderRecompiler::IR::ResourceSnapshot       resources;
+			ShaderRecompiler::IR::ResourceSpecialization specialization;
+			size_t                                       permutation = SIZE_MAX;
+		};
+
+		// Returns the stored result whose inputs still hold, or nullptr.
+		[[nodiscard]] static uint64_t MemoKey(std::span<const uint32_t> user_data,
+		                                      uint64_t                  shader_base) {
+			uint64_t key = shader_base ^ 0x9e3779b97f4a7c15ull;
+			for (const auto word: user_data) {
+				key = (key ^ word) * 0x100000001b3ull;
+			}
+			return key;
+		}
+
+		[[nodiscard]] Memo* FindMemo(std::span<const uint32_t> user_data, uint64_t shader_base) {
+			g_memo_stats.lookups++;
+			bool       user_data_matched = false;
+			const auto key               = MemoKey(user_data, shader_base);
+			for (auto& memo: memos) {
+				if (memo.key != key || memo.shader_base != shader_base ||
+				    memo.user_data.size() != user_data.size() ||
+				    std::memcmp(memo.user_data.data(), user_data.data(),
+				                user_data.size() * sizeof(uint32_t)) != 0) {
+					continue;
+				}
+				user_data_matched = true;
+				bool valid        = true;
+				for (const auto& read: memo.reads) {
+					uint32_t word = 0;
+					if (read.clean) {
+						valid = ReadShaderGuestMemory(nullptr, read.address, &word);
+					} else {
+						std::memcpy(&word, reinterpret_cast<const void*>(read.address),
+						            sizeof(word));
+					}
+					if (!valid || word != read.value) {
+						valid = false;
+						break;
+					}
+				}
+				if (valid) {
+					g_memo_stats.hits++;
+					return &memo;
+				}
+			}
+			(user_data_matched ? g_memo_stats.read_misses : g_memo_stats.user_data_misses)++;
+			return nullptr;
+		}
+
+		Memo& StoreMemo() {
+			constexpr size_t MaxMemos = 256;
+			if (memos.size() < MaxMemos) {
+				return memos.emplace_back();
+			}
+			auto& memo = memos[next_memo];
+			next_memo  = (next_memo + 1u) % MaxMemos;
+			memo       = {};
+			return memo;
+		}
+
 		ShaderRecompiler::IR::ResourcePlan resource_plan;
 		std::vector<Permutation>           permutations;
+		std::vector<Memo>                  memos;
+		size_t                             next_memo = 0;
 	};
 
 	struct ProgramKeyHash {
@@ -274,6 +414,7 @@ struct PipelineCache::ProgramCache {
 			stage = ShaderType::Compute;
 		}
 
+		KYTY_PROFILER_BLOCK("Shader::Get");
 		lookup_key.stage           = stage;
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = static_cast<uint32_t>(params.user_data.size());
@@ -288,10 +429,63 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, resources, specialization));
+			SourceEntry::Memo* memo = nullptr;
+			if (MaterializeMemoEnabled()) {
+				ReportMaterializeMemoStats();
+				KYTY_PROFILER_BLOCK("Shader::MemoLookup");
+				memo = entry->second.FindMemo(params.user_data, params.Base());
+			}
+			if (memo != nullptr) {
+				KYTY_PROFILER_BLOCK("Shader::MemoHit");
+				if (memo->permutation < entry->second.permutations.size()) {
+					auto&       permutation = entry->second.permutations[memo->permutation];
+					const auto& layout      = permutation.program.bindings;
+					if (layout.push_data_start_dword ==
+					    ShaderRecompiler::IR::PushData::StartFor(push_data_cursor,
+					                                             layout.ShaderDataDwords())) {
+						input_info.stage = {.program   = &permutation.program,
+						                    .resources = memo->resources};
+						permutation.program.bindings.AdvancePushData(push_data_cursor);
+						return permutation.handle;
+					}
+				}
+				resources      = memo->resources;
+				specialization = memo->specialization;
+			} else {
+				KYTY_PROFILER_BLOCK("Shader::MaterializeResources");
+				MaterializeRecorder recorder;
+				auto                recording = runtime;
+				if (MaterializeMemoEnabled()) {
+					recording.userdata                   = &recorder;
+					recording.read_memory                = RecordRawGuestRead;
+					recording.read_specialization_memory = RecordCleanGuestRead;
+				}
+				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+				    entry->second.resource_plan, recording, resources, specialization));
+				if (MaterializeMemoEnabled() && recorder.failed) {
+					g_memo_stats.unrecordable++;
+				}
+				if (MaterializeMemoEnabled() && !recorder.failed) {
+					g_memo_stats.recorded++;
+					g_memo_stats.recorded_reads += recorder.reads.size();
+					std::ranges::sort(recorder.reads, [](const auto& lhs, const auto& rhs) {
+						return std::tie(lhs.address, lhs.clean) < std::tie(rhs.address, rhs.clean);
+					});
+					const auto duplicates = std::ranges::unique(recorder.reads);
+					recorder.reads.erase(duplicates.begin(), duplicates.end());
+					memo = &entry->second.StoreMemo();
+					memo->user_data.assign(params.user_data.begin(), params.user_data.end());
+					memo->shader_base    = params.Base();
+					memo->key            = SourceEntry::MemoKey(params.user_data, params.Base());
+					memo->reads          = std::move(recorder.reads);
+					memo->resources      = resources;
+					memo->specialization = specialization;
+				}
+			}
+			KYTY_PROFILER_BLOCK("Shader::FindPermutation");
 			if (const auto permutation = std::ranges::find_if(
-			        entry->second.permutations, [&](const Permutation& candidate) {
+			        entry->second.permutations,
+			        [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
 				        return layout.push_data_start_dword ==
 				                   ShaderRecompiler::IR::PushData::StartFor(
@@ -299,6 +493,10 @@ struct PipelineCache::ProgramCache {
 				               candidate.specialization == specialization;
 			        });
 			    permutation != entry->second.permutations.end()) {
+				if (memo != nullptr) {
+					memo->permutation =
+					    static_cast<size_t>(permutation - entry->second.permutations.begin());
+				}
 				input_info.stage = {.program   = &permutation->program,
 				                    .resources = std::move(resources)};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
@@ -329,7 +527,7 @@ struct PipelineCache::ProgramCache {
 		options.stage       = stage;
 		options.shader_hash = params.hash;
 		options.user_data   = params.user_data;
-		options.back_code      = params.back_code;
+		options.back_code   = params.back_code;
 		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 		options.early_dump  = options.dump_ir;
 		options.dump_label  = label;
@@ -524,8 +722,8 @@ void PipelineCache::Save() {
 	}
 	if (result != vk::Result::eSuccess || size == 0 ||
 	    size > std::numeric_limits<uint32_t>::max()) {
-		PipelineCacheLog("Vulkan pipeline cache: save failed ({}, {} bytes)",
-		                 vk::to_string(result), size);
+		PipelineCacheLog("Vulkan pipeline cache: save failed ({}, {} bytes)", vk::to_string(result),
+		                 size);
 		return;
 	}
 	payload.resize(size);
@@ -611,7 +809,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	Common::LockGuard lock(m_mutex);
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
-	GraphicsPrograms  result;
+	GraphicsPrograms result;
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 	}
@@ -682,8 +880,8 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 			EXIT("mixed color attachment sample counts are unsupported: %u and %u\n",
 			     attachment_samples, colors[i].desc.info.samples);
 		}
-		const auto& rt                        = ctx.GetRenderTarget(colors[i].target_slot);
-		const auto& bc                        = ctx.GetBlendControl(colors[i].target_slot);
+		const auto& rt                           = ctx.GetRenderTarget(colors[i].target_slot);
+		const auto& bc                           = ctx.GetBlendControl(colors[i].target_slot);
 		static_params.color_srcblend[slot]       = bc.color_srcblend;
 		static_params.color_comb_fcn[slot]       = bc.color_comb_fcn;
 		static_params.color_destblend[slot]      = bc.color_destblend;
@@ -742,9 +940,9 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	static_params.depth_max_bounds         = depth.depth_max_bounds;
 	const bool rect_list =
 	    command.GetUserConfig().GetPrimType() == Prospero::PrimitiveType::kRectList;
-	static_params.cull_back  = !rect_list && mc.cull_back;
-	static_params.cull_front = !rect_list && mc.cull_front;
-	static_params.face       = mc.face;
+	static_params.cull_back          = !rect_list && mc.cull_back;
+	static_params.cull_front         = !rect_list && mc.cull_front;
+	static_params.face               = mc.face;
 	static_params.provoking_vtx_last = mc.provoking_vtx_last;
 	static_params.polygon_mode =
 	    ResolvePolygonMode(mc, static_params.cull_front, static_params.cull_back);
@@ -805,9 +1003,8 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	return *iter->second;
 }
 
-PipelineCache::Pipeline&
-PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
-                                  const ShaderProgram&          compute_program) {
+PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
+                                                           const ShaderProgram& compute_program) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
 	EXIT_IF(!compute_program);
