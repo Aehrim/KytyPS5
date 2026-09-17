@@ -45,6 +45,10 @@ public:
 		return FULL;
 	}
 
+	[[nodiscard]] std::optional<std::string> Directory(size_t slot) const {
+		return slot < m_directories.size() ? m_directories[slot] : std::nullopt;
+	}
+
 	[[nodiscard]] static std::string MountPoint(size_t slot) {
 		return "/savedata" + std::to_string(slot);
 	}

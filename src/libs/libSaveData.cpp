@@ -13,9 +13,19 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
 #include <vector>
+
+// Save data calls are rare and their order matters when a title refuses to save, so their
+// names are always logged.
+#undef PRINT_NAME
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define PRINT_NAME() LOGF("SaveData::%s()\n", __func__)
 
 namespace Libs {
 
@@ -236,7 +246,38 @@ static std::vector<uint8_t>      g_save_data_memory(0x10000);
 static int32_t                   g_next_transaction_resource = 1;
 static std::deque<SaveDataEvent> g_save_data_events;
 static SaveDataMountSlots        g_mount_slots;
-static Common::Mutex             g_mount_mutex;
+
+// A save data directory occupies the block count requested when it was created; titles budget
+// their saves with these numbers, so they must not be a constant maximum.
+static constexpr uint64_t SAVE_DATA_BLOCK_SIZE    = 32768;
+static constexpr uint64_t SAVE_DATA_BLOCKS_MIN    = 96;
+static constexpr char     SAVE_DATA_BLOCKS_FILE[] = "sce_kyty_blocks";
+
+static uint64_t SaveDataUsedBlocks(const std::string& directory) {
+	uint64_t        bytes = 0;
+	std::error_code error;
+	for (auto it = std::filesystem::recursive_directory_iterator(directory, error);
+	     !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error)) {
+		if (it->is_regular_file(error)) {
+			bytes += it->file_size(error);
+		}
+	}
+	return (bytes + SAVE_DATA_BLOCK_SIZE - 1) / SAVE_DATA_BLOCK_SIZE;
+}
+
+static uint64_t SaveDataTotalBlocks(const std::string& directory, uint64_t requested = 0) {
+	const auto    path   = std::filesystem::path(directory) / SAVE_DATA_BLOCKS_FILE;
+	uint64_t      blocks = 0;
+	std::ifstream input(path);
+	if (!(input >> blocks) || blocks == 0) {
+		blocks = std::max({requested, SaveDataUsedBlocks(directory), SAVE_DATA_BLOCKS_MIN});
+		if (requested != 0) {
+			std::ofstream(path) << blocks;
+		}
+	}
+	return std::min(blocks, SAVE_DATA_BLOCKS_MAX);
+}
+static Common::Mutex g_mount_mutex;
 
 static std::string get_title_id() {
 	std::string title_id;
@@ -411,9 +452,12 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 			result->params[i] = {};
 		}
 		if (result->infos != nullptr) {
+			const auto directory         = root + "/" + dir_list[i];
+			const auto total             = SaveDataTotalBlocks(directory);
+			const auto used              = std::min(SaveDataUsedBlocks(directory), total);
 			result->infos[i]             = {};
-			result->infos[i].blocks      = SAVE_DATA_BLOCKS_MAX;
-			result->infos[i].free_blocks = SAVE_DATA_BLOCKS_MAX;
+			result->infos[i].blocks      = total;
+			result->infos[i].free_blocks = total - used;
 		}
 	}
 
@@ -474,6 +518,7 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 		EXIT_NOT_IMPLEMENTED((!Common::File::IsDirectoryExisting(mount_dir)));
 	}
 
+	(void)SaveDataTotalBlocks(mount_dir, mount->blocks);
 	return mount_save_data(slot, dir_name, mount_dir, created ? 1u : 0u, mount_result);
 }
 
@@ -853,8 +898,21 @@ int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point,
 
 	*info = {};
 
-	info->blocks      = SAVE_DATA_BLOCKS_MAX;
-	info->free_blocks = SAVE_DATA_BLOCKS_MAX;
+	info->blocks      = SAVE_DATA_BLOCKS_MIN;
+	info->free_blocks = SAVE_DATA_BLOCKS_MIN;
+	Common::LockGuard lock(g_mount_mutex);
+	const int         slot = g_mount_slots.Find(mount_point->data);
+	if (slot >= 0) {
+		if (const auto dir_name = g_mount_slots.Directory(static_cast<size_t>(slot))) {
+			const std::string directory =
+			    std::string(SAVE_DATA_DIR) + "/" + get_title_id() + "/" + *dir_name;
+			const auto total  = SaveDataTotalBlocks(directory);
+			const auto used   = std::min(SaveDataUsedBlocks(directory), total);
+			info->blocks      = total;
+			info->free_blocks = total - used;
+		}
+	}
+	LOGF("\t blocks = %" PRIu64 ", free_blocks = %" PRIu64 "\n", info->blocks, info->free_blocks);
 
 	return OK;
 }

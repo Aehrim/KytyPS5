@@ -428,13 +428,14 @@ int KYTY_SYSV_ABI SaveDataDialogOpen(const void* param) {
 			     "\t mode           = %d\n"
 			     "\t disp_type      = %d\n"
 			     "\t sys_msg_type   = %d\n"
+			     "\t sys_msg_value  = %" PRIu64 "\n"
 			     "\t items          = 0x%016" PRIx64 "\n"
 			     "\t user_msg_param = 0x%016" PRIx64 "\n"
 			     "\t sys_msg_param  = 0x%016" PRIx64 "\n"
 			     "\t prog_bar_param = 0x%016" PRIx64 "\n"
 			     "\t user_data      = 0x%016" PRIx64 "\n",
 			     p->size, p->mode, p->disp_type, sys_msg != nullptr ? sys_msg->sys_msg_type : -1,
-			     reinterpret_cast<uint64_t>(p->items),
+			     sys_msg != nullptr ? sys_msg->value : 0, reinterpret_cast<uint64_t>(p->items),
 			     reinterpret_cast<uint64_t>(p->user_msg_param),
 			     reinterpret_cast<uint64_t>(p->sys_msg_param),
 			     reinterpret_cast<uint64_t>(p->prog_bar_param),
