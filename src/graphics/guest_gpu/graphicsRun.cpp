@@ -560,7 +560,7 @@ void GuestGpu::ThreadRun(void* data) {
 
 bool GuestGpu::Process(Submission& submission) {
 	const bool first_slice = !submission.started;
-	auto& cp = GetProcessor(submission.queue_id);
+	auto&      cp          = GetProcessor(submission.queue_id);
 
 	if (first_slice && submission.reset_processor) {
 		cp.Reset();
@@ -822,14 +822,12 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	uint64_t value = 0;
 
 	switch (op) {
-		case 0x00:
-			m_predicate_skip = false;
-			return;
+		case 0x00: m_predicate_skip = false; return;
 		case 0x01: {
 			EXIT_NOT_IMPLEMENTED(address == nullptr);
 			// One begin/end pair per DB; bit 63 marks each counter ready.
 			constexpr uint64_t ready_bit = 1ull << 63u;
-			const auto* results = reinterpret_cast<const volatile uint64_t*>(address);
+			const auto*        results   = reinterpret_cast<const volatile uint64_t*>(address);
 			for (uint32_t db = 0; db < 16u; db++) {
 				const auto begin = results[db * 2u];
 				const auto end   = results[db * 2u + 1u];
@@ -863,8 +861,8 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 		if (log_count.fetch_add(1) < 128) {
 			LOGF("\t bool predication: addr=0x%016" PRIx64 ", value=0x%016" PRIx64
 			     ", condition=%" PRIu32 ", skip=%u, wait_op=%" PRIu32 "\n",
-			     reinterpret_cast<uint64_t>(address), value, condition,
-			     m_predicate_skip ? 1u : 0u, wait_op);
+			     reinterpret_cast<uint64_t>(address), value, condition, m_predicate_skip ? 1u : 0u,
+			     wait_op);
 		}
 	}
 }
@@ -1069,7 +1067,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
-                                      uint32_t thread_group_z, uint32_t mode) {
+                                      uint32_t thread_group_z, uint32_t mode,
+                                      uint64_t indirect_args) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 
 	uint32_t frame_num = 0;
@@ -1103,7 +1102,8 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		// local_y        = std::max(cs.num_thread_y, 1u);
 		// local_z        = std::max(cs.num_thread_z, 1u);
 		m_renderer.GetRenderExecutor().DispatchDirect(m_submit_id, CurrentBuffer(), thread_group_x,
-		                                              thread_group_y, thread_group_z, mode);
+		                                              thread_group_y, thread_group_z, mode,
+		                                              indirect_args);
 	}
 
 	/*constexpr uint32_t DispatchInitiatorUseThreadDimensions = 1u << 5u;
@@ -1141,7 +1141,9 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode) {
 	const auto args_addr = m_dispatch_indirect_args_base_addr + data_offset;
 	auto*      args      = reinterpret_cast<const DispatchIndirectArgs*>(args_addr);
 
-	DispatchDirect(args->thread_group_x, args->thread_group_y, args->thread_group_z, mode);
+	// The renderer reads the counts itself, or leaves them to the GPU when the GPU wrote them.
+	(void)args;
+	DispatchDirect(0, 0, 0, mode, args_addr);
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {

@@ -199,7 +199,8 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
-                                    uint32_t thread_group_z, uint32_t mode) {
+                                    uint32_t thread_group_z, uint32_t mode,
+                                    uint64_t indirect_args) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer.IsInvalid());
 	{
@@ -213,7 +214,25 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	                    thread_group_x, thread_group_y, thread_group_z, mode,
 	                    sh_ctx.GetCs().cs_regs.data_addr);
 
-	if (thread_group_x == 0 || thread_group_y == 0 || thread_group_z == 0) {
+	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
+	bool               host_indirect                            = false;
+	if (indirect_args != 0) {
+		Common::LockGuard lock(m_context.GetMutex());
+		// Thread-dimension dispatches need the counts on the CPU to convert them to groups.
+		host_indirect =
+		    (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0 &&
+		    m_context.GetBufferCache().HasGpuDirtyBytes(indirect_args, 3u * sizeof(uint32_t));
+		if (!host_indirect) {
+			KYTY_PROFILER_BLOCK("DispatchIndirect::ReadArgs");
+			uint32_t groups[3] {};
+			std::memcpy(groups, reinterpret_cast<const void*>(indirect_args), sizeof(groups));
+			thread_group_x = groups[0];
+			thread_group_y = groups[1];
+			thread_group_z = groups[2];
+		}
+	}
+
+	if (!host_indirect && (thread_group_x == 0 || thread_group_y == 0 || thread_group_z == 0)) {
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1, std::memory_order_relaxed) < 32) {
 			LOGF("GraphicsRenderDispatchDirect: skipping zero-sized dispatch groups=%ux%ux%u "
@@ -236,9 +255,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
-	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
-	constexpr uint32_t DISPATCH_INITIATOR_BASE_BITS             = 0x41u;
-	constexpr uint32_t DISPATCH_INITIATOR_MODIFIER_BITS         = 0xa038u;
+	constexpr uint32_t DISPATCH_INITIATOR_BASE_BITS     = 0x41u;
+	constexpr uint32_t DISPATCH_INITIATOR_MODIFIER_BITS = 0xa038u;
 	constexpr uint32_t DISPATCH_INITIATOR_KNOWN_MASK =
 	    DISPATCH_INITIATOR_BASE_BITS | DISPATCH_INITIATOR_MODIFIER_BITS;
 
@@ -276,8 +294,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		ResetBindings();
 		return;
 	}
-	if (TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
-	                                thread_group_z, mode)) {
+	// The clear shortcut needs the group counts; GPU-written counts run the shader instead.
+	if (!host_indirect && TryConsumeComputeImageClear(input_info, buffer, thread_group_x,
+	                                                  thread_group_y, thread_group_z, mode)) {
 		ResetBindings();
 		return;
 	}
@@ -379,10 +398,22 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	auto bindings = PrepareBindings(input_info.stage);
 	FindBuffers(bindings);
 	if (program.info.uses_dma) {
+		KYTY_PROFILER_BLOCK("Dispatch::PrepareBda");
 		m_context.PrepareBda();
 	}
-	RebindImages(bindings);
+	{
+		KYTY_PROFILER_BLOCK("Dispatch::RebindImages");
+		RebindImages(bindings);
+	}
 	RebindBuffers(bindings);
+	vk::Buffer indirect_buffer = nullptr;
+	uint64_t   indirect_offset = 0;
+	if (host_indirect) {
+		const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
+		    indirect_args, 3u * sizeof(uint32_t), false, false);
+		indirect_buffer = args_buffer->Handle();
+		indirect_offset = args_offset;
+	}
 
 	auto              vk_buffer        = buffer.Handle();
 	PreparedBindings* descriptor_stage = &bindings;
@@ -397,16 +428,24 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		                           ShaderRecompiler::IR::ImageResourceClass::Storage;
 	                }) ||
 	    has_storage_writes;
-	if (has_storage_writes) {
-		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
-		// while allowing the queue to execute asynchronously.
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	}
-	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	{
+		KYTY_PROFILER_BLOCK("Dispatch::VulkanCommands");
+		if (has_storage_writes) {
+			// A host fence used to serialize every dispatch. Preserve its read-before-write
+			// ordering while allowing the queue to execute asynchronously.
+			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		if (host_indirect) {
+			vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
+		} else {
+			vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		}
 
-	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		// The removed host fence also ordered read-only dispatches before later writers.
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	}
+	KYTY_PROFILER_BLOCK("Dispatch::ResetBindings");
 	ResetBindings();
 }
 
