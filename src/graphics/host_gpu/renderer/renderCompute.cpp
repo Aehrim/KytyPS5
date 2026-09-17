@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/drawStats.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -21,6 +22,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
 #include "kernel/eventQueue.h"
+#include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
@@ -222,12 +224,18 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		// Thread-dimension dispatches need the counts on the CPU to convert them to groups.
 		static const bool host_indirect_enabled = std::getenv("KYTY_NO_HOST_INDIRECT") == nullptr;
 		host_indirect =
-		    host_indirect_enabled && (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0 &&
+		    host_indirect_enabled && DrawStats::FastPaths().load(std::memory_order_relaxed) &&
+		    (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0 &&
 		    m_context.GetBufferCache().HasGpuDirtyBytes(indirect_args, 3u * sizeof(uint32_t));
 		if (!host_indirect) {
 			KYTY_PROFILER_BLOCK("DispatchIndirect::ReadArgs");
 			uint32_t groups[3] {};
-			std::memcpy(groups, reinterpret_cast<const void*>(indirect_args), sizeof(groups));
+			// CPU-written counts on a page that also holds GPU data: the backing store serves
+			// them without the page fault and GPU drain of a plain read.
+			if (!Libs::LibKernel::Memory::TryReadGpuCleanBacking(indirect_args, groups,
+			                                                     sizeof(groups))) {
+				std::memcpy(groups, reinterpret_cast<const void*>(indirect_args), sizeof(groups));
+			}
 			thread_group_x = groups[0];
 			thread_group_y = groups[1];
 			thread_group_z = groups[2];
