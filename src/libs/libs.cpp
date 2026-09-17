@@ -4,7 +4,28 @@
 #include "libs/errno.h"
 #include "loader/symbolDatabase.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <thread>
+
 namespace Libs {
+
+std::atomic_bool g_trace_all_calls {false};
+
+// KYTY_TRACE_BOOT_SECONDS=<n> traces every HLE call for the first n seconds of the process.
+static const bool g_trace_boot = [] {
+	const char* text = std::getenv("KYTY_TRACE_BOOT_SECONDS");
+	const int   secs = text != nullptr ? std::atoi(text) : 0;
+	if (secs > 0) {
+		g_trace_all_calls.store(true);
+		std::thread([secs] {
+			std::this_thread::sleep_for(std::chrono::seconds(secs));
+			g_trace_all_calls.store(false);
+		}).detach();
+	}
+	return secs > 0;
+}();
 
 namespace LibContentDelete {
 LIB_DEFINE(InitContentDelete_1);

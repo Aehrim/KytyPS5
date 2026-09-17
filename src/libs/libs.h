@@ -7,6 +7,14 @@
 #include "common/threads.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
+#include <atomic>
+
+namespace Libs {
+// Runtime switch (F2 in the game window) that logs every HLE call regardless of the per-library
+// PRINT_NAME setting; used to see what a stuck guest is waiting for.
+extern std::atomic_bool g_trace_all_calls;
+} // namespace Libs
+
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME_ENABLED g_print_name
 
@@ -48,7 +56,7 @@
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                               \
-	if (PRINT_NAME_ENABLED) {                                                                      \
+	if (PRINT_NAME_ENABLED || ::Libs::g_trace_all_calls.load(std::memory_order_relaxed)) {         \
 		if (Log::GetDirection() != Log::Direction::Silent) {                                       \
 			const auto print_name_time = Loader::Timer::GetTime().ToString("HH24:MI:SS.FFF");      \
 			LOGF_COLOR(Log::Color::Cyan, "[%d][%s] %s::%s::%s()\n",                                \
