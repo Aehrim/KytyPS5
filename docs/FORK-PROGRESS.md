@@ -379,6 +379,8 @@ vergleichen; (2) strukturell hilft nur, die Arbeit pro Draw weiter zu senken (Im
 ~70–200 `Image::Image`/s à 0,5–1,4 ms; `ResolveRenderColorTarget`; `ExecutePreparedDraw`) oder sie auf mehrere
 Threads zu verteilen (Deskriptor-Vorbereitung parallel zur Vulkan-Aufzeichnung).
 
+**Upstream-Merge 2026-09-17:** `upstream/main` bis `ce629e0` (11 Commits: Gyro/Motion, `S_ASHR_I64`, Gather-Näherung bei Mip 0, Stencil-Zuordnung, SWAPPC-Handoffs, EXPCLEAR, Command-Buffer-Kapazität, macOS SSE4a) in den Arbeitsbranch gemergt (`78ffbed`). Einziger Konflikt: `.vscode/settings.json` (lokale Toolchain-Pfade + Qt 6.8.3 behalten, Upstreams clang-IntelliSense übernommen, `compile_commands.json` wird jetzt nach `_Build/windows` exportiert). Build und die drei Recompiler-Unit-Tests grün; Spieltest mit dem gemergten Stand steht noch aus.
+
 **Weitere Fixes dieser Runde** (`a5b52e8`): Upload-Quelle mit entmapptem Ende (Absturz in `memcpy`, Lauf 50) → nur
 den gemappten Teil kopieren; 561-MiB-Image-Upload aus unplausiblem Deskriptor (Lauf 52) → Upload überspringen.
 
