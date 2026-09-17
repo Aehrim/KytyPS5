@@ -58,7 +58,15 @@ void BufferCache::Unregister(BufferId id) {
 template <bool insert>
 void BufferCache::ChangeRegister(BufferId id) {
 	m_registration_epoch++;
-	auto&                buffer = m_slot_buffers[id];
+	auto& buffer = m_slot_buffers[id];
+	if constexpr (insert) {
+		constexpr size_t MaxLoggedRegistrations = 256;
+		if (m_new_registrations.size() < MaxLoggedRegistrations) {
+			m_new_registrations.emplace_back(buffer.CpuAddress(), buffer.Size());
+		} else {
+			m_new_registrations_overflow = true;
+		}
+	}
 	PageTable::PageRange pages {};
 	EXIT_IF(!PageTable::TryGetPageRange(buffer.CpuAddress(), buffer.Size(), pages));
 	for (size_t page = pages.first; page < pages.last_exclusive; ++page) {
@@ -727,6 +735,14 @@ void BufferCache::ProcessNanTrace() {
 
 void BufferCache::ProcessFaultBuffer() {
 	m_fault_manager.ProcessFaultBuffer();
+}
+
+bool BufferCache::TakeNewRegistrations(std::vector<std::pair<uint64_t, uint64_t>>& ranges) {
+	ranges.clear();
+	ranges.swap(m_new_registrations);
+	const bool complete          = !m_new_registrations_overflow;
+	m_new_registrations_overflow = false;
+	return complete;
 }
 
 void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {

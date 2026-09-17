@@ -60,7 +60,10 @@ public:
 	[[nodiscard]] Buffer* GetNanTraceBuffer() noexcept { return &m_nan_trace_buffer; }
 	// Changes whenever a buffer is registered or unregistered.
 	[[nodiscard]] uint64_t RegistrationEpoch() const noexcept { return m_registration_epoch; }
-	void                   ProcessNanTrace();
+	// Guest ranges of the buffers registered since the previous call; false when the list
+	// overflowed and is incomplete.
+	[[nodiscard]] bool TakeNewRegistrations(std::vector<std::pair<uint64_t, uint64_t>>& ranges);
+	void               ProcessNanTrace();
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
@@ -117,6 +120,8 @@ private:
 	Buffer                                             m_gds_buffer;
 	Buffer                                             m_nan_trace_buffer;
 	uint64_t                                           m_registration_epoch = 0;
+	std::vector<std::pair<uint64_t, uint64_t>>         m_new_registrations;
+	bool                                               m_new_registrations_overflow = false;
 	std::vector<uint8_t>                               m_nan_trace_seen;
 	Buffer                                             m_bda_pagetable_buffer;
 	Common::SlotVector<Buffer>                         m_slot_buffers;

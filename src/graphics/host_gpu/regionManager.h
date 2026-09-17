@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #ifndef NOMINMAX
@@ -98,11 +99,55 @@ public:
 		return epoch;
 	}
 
+	// Ranges that turned CPU-dirty since the log was taken last. The BDA synchronization only
+	// has to visit these instead of every buffer; when the log overflows it reports that it
+	// is incomplete and the caller walks everything.
+	class CpuDirtyLog {
+	public:
+		using Range = std::pair<uint64_t, uint64_t>;
+
+		void Add(uint64_t vaddr, uint64_t size) {
+			std::scoped_lock lock(m_mutex);
+			if (!m_ranges.empty() && m_ranges.back() == Range {vaddr, size}) {
+				return;
+			}
+			if (m_ranges.size() < Capacity) {
+				m_ranges.emplace_back(vaddr, size);
+			} else {
+				m_overflow = true;
+			}
+		}
+
+		// Returns false when ranges were dropped.
+		[[nodiscard]] bool Take(std::vector<Range>& ranges) {
+			std::scoped_lock lock(m_mutex);
+			ranges.clear();
+			ranges.swap(m_ranges);
+			m_ranges.reserve(Capacity);
+			const bool complete = !m_overflow;
+			m_overflow          = false;
+			return complete;
+		}
+
+	private:
+		static constexpr size_t Capacity = 512;
+
+		std::mutex         m_mutex;
+		std::vector<Range> m_ranges;
+		bool               m_overflow = false;
+	};
+
+	[[nodiscard]] static CpuDirtyLog& GetCpuDirtyLog() {
+		static CpuDirtyLog log;
+		return log;
+	}
+
 	template <DirtySource source, bool enable>
 	void ChangeState(uint64_t vaddr, uint64_t size) {
 		const auto [start, end] = GetPageRange(vaddr, size);
 		if constexpr (source == DirtySource::Cpu && enable) {
 			CpuDirtyEpoch().fetch_add(1, std::memory_order_relaxed);
+			GetCpuDirtyLog().Add(vaddr, size);
 			if (RegionBits(m_gpu_dirty, start, end).Any()) {
 				EXIT("CPU dirty state conflicts with GPU dirty state\n");
 			}

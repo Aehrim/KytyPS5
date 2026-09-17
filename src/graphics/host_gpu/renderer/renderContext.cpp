@@ -136,8 +136,24 @@ void RenderContext::PrepareBda() {
 	const auto        buffer_epoch = m_buffer_cache.RegistrationEpoch();
 	const auto        mapped_epoch = m_mapped_ranges_epoch.load(std::memory_order_relaxed);
 	static const bool skip_enabled = std::getenv("KYTY_NO_BDA_SKIP") == nullptr;
-	if (skip_enabled && m_bda_synchronized && dirty_epoch == m_bda_dirty_epoch &&
-	    buffer_epoch == m_bda_buffer_epoch && mapped_epoch == m_bda_mapped_epoch) {
+	// Uploads can only be pending under pages that turned CPU-dirty and in buffers that were
+	// registered since the previous call; both are logged. A full walk is only needed after a
+	// mapping change or when a log overflowed.
+	using Range = RegionManager::CpuDirtyLog::Range;
+	thread_local std::vector<Range> dirty_ranges;
+	thread_local std::vector<Range> new_buffers;
+	const bool dirty_complete  = RegionManager::GetCpuDirtyLog().Take(dirty_ranges);
+	const bool buffer_complete = m_buffer_cache.TakeNewRegistrations(new_buffers);
+	if (skip_enabled && m_bda_synchronized && mapped_epoch == m_bda_mapped_epoch &&
+	    dirty_complete && buffer_complete) {
+		for (const auto& [vaddr, size]: dirty_ranges) {
+			m_buffer_cache.SynchronizeBuffersInRange(vaddr, size);
+		}
+		for (const auto& [vaddr, size]: new_buffers) {
+			m_buffer_cache.SynchronizeBuffersInRange(vaddr, size);
+		}
+		m_bda_dirty_epoch  = dirty_epoch;
+		m_bda_buffer_epoch = buffer_epoch;
 		return;
 	}
 	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
