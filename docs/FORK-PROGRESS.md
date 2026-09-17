@@ -40,7 +40,7 @@ Auswertung headless: `qrenderdoc.exe --python <script.py>` mit dem `renderdoc`-M
 | Intro-/Logo-Videos (Bink) | ✅ mit Ton |
 | Hauptmenü | ✅ bedienbar, **kein Ton** |
 | Neues Spiel → Charakter-Editor | ✅ vollständig durchlaufen (Texturen größtenteils schwarz) |
-| Charakter-Editor → Spielwelt | ✅ **Im Spiel**, Kamera und Bewegung funktionieren; HUD korrekt; Cutscenes rendern korrekt (seit `19536cf`); Spielwelt: weiß → kurz Texturen → schwarz (Problem 12) |
+| Charakter-Editor → Spielwelt | ✅ **Im Spiel**, Kamera und Bewegung funktionieren; HUD korrekt; **Spielwelt rendert** (Lauf 41: Tunnel, Lichtschacht, Figur, HUD, Menüs); Stabilität des Bildes ohne Tracer noch in Klärung (Problem 12) |
 | Performance | 1–2 fps in der Welt – Shader-Kompilierung, kein Pipeline-Cache, CPU-seitige Tabellen-Materialisierung pro Dispatch; noch nicht aussagekräftig |
 
 ## Meilensteine
@@ -257,6 +257,35 @@ Instruktion finden. Werkzeuge: `rd_overview.py`, `rd_passes.py`, `rd_dump.py` (P
     `BufferCache: download exceeds 32 MiB staging buffer capacity`. → GPU-modifizierte Bereiche werden in Stücke
     ≤ 16 MiB zerlegt und batchweise über den Download-Ring geholt; der Command-Buffer wird pro Batch neu geholt, weil
     das Mappen auf den Ring warten und dabei submitten kann. Lauf 34 kam über die Stelle hinaus (noch nicht committet).
+
+25. **Unbekannte Bits im Tiefen-Deskriptor** (`descriptors.cpp`, Lauf 36): Szenen-Tiefe (2560×1440 D32) wird über
+    einen 2D-Deskriptor mit `DEPTH=1216`/`BASE_ARRAY=48` gesampelt → `unsupported sampled depth image … encoding=0`.
+    Bild und View sind gültig → Warnung statt Abbruch. Commit `c8ee705`.
+26. **Werkzeuge:** zweites F1 beendet ein RenderDoc-Capture (`14bf2db`; ein Guest, der nicht präsentiert, hielt das
+    2-Flip-Capture sonst endlos offen – Lauf 34: 30 min, RAM voll). `Present heartbeat`-Zeile (max. 1/s) zeigt in
+    jedem Log, ob und wie schnell der Guest präsentiert; ATRAC9-Init-Meldungen gedeckelt (vorher Millionen Zeilen
+    über die gemeinsame Log-Sperre, Guest-Log > 1 GB) – Commit `e076806`.
+27. **NaN-Tracer `KYTY_NAN_TRACE=<Shader-Hash>`** (`c25f9e0`): instrumentiert einen Shader – nach jeder F32-
+    Instruktion markiert ein verzweigungsfreier Store den Slot, wenn das Ergebnis NaN (bzw. ±Inf) ist, obwohl kein
+    Float-Operand es war. BitCasts zählen nur, wenn die Bits direkt aus Load/Sample/ReadConst kommen. Der Emitter
+    druckt eine Legende (`nan-trace legend: slot, op, Guest-pc-Bereich des Blocks`) nach stderr, der Host liest den
+    Trace-Buffer (neue Binding-Art `NanTrace`) 1×/s und loggt die Menge aktiver Quellen bei jeder Änderung.
+    Hintergrund: RenderDocs `DebugThread` stürzt bei Shadern mit Subgroup-Ops ab.
+    Befund im Nebel-Lichtshader `0xf0dc79c3467d5e0b`: (a) Rückprojektion ins Vorbild – `V_RCP_F32` (1/w = Inf),
+    `V_LOG_F32` (NaN) – vom Spiel per `V_CMP_CLASS_F32 …, 56` (isfinite) und geordneten Vergleichen abgefangen;
+    (b) Licht-Records (Buffer, Stride 384): Feld +12 einzelner Records ist NaN/Inf, vom Spiel per `V_CMP_NGT_F32`
+    (unordered) abgefangen; (c) `1/Σw`, `log(0)` in den Schleifen, ebenfalls geschützt.
+28. **Teilweise gemappte Bildquelle** (`bufferCache.cpp`, Lauf 40): `failed to read mapped guest image backing` →
+    vorhandenen Teil hochladen, Rest nullen, Fall loggen. Commit `c25f9e0`.
+
+### 2026-09-17 – Durchbruch: die Spielwelt rendert
+
+**Lauf 41** (Binary `c25f9e0`, mit aktivem NaN-Tracer): Tutorial-Tunnel mit volumetrischem Lichtschacht, Laub, Pfütze,
+Spielfigur mit Schild und Axt, HUD; Ausrüstungsmenü vollständig (Icons, Attribute, Modell). 1–2 fps, 2427 Flips,
+sauberes Ende, VS 208 / PS 347 / CS 743. Entscheidend waren die formatierten Buffer-Stores (Meilenstein 22).
+**Offen:** Lauf 37 (gleicher Stand ohne Tracer und ohne Meilenstein 28) wurde in der Welt noch schwarz (HDR-Target
+RGB = NaN). Ob der Tracer das Bild beeinflusst (Compiler-Optimierung der NaN-Vergleiche) oder es Zufall/Meilenstein
+28 war, klärt Kontrolllauf 42 ohne Tracer.
 
 **RenderDoc-Praxis:** Mit `--rd` belegt der Emulator in der Welt 22–24 GB statt ~10 GB; bei 32 GB RAM und weiteren
 offenen Programmen lagert Windows aus und ein 2-Flip-Capture dauert > 20 min. Vor Captures alles schließen;
