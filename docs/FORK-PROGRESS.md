@@ -343,6 +343,28 @@ spielen keine Rolle (≈ 0–1 pro Aufruf). fps bisher unverändert ~2,2 – der
 Variante 1 verspricht mehr, Variante 2 ist unabhängig davon sinnvoll. Danach: `Dispatch::BindAndEmit` (26 µs),
 `CpOpDispatchIndirect` (224 µs), Image-Erzeugung (0,5 ms pro Stück, ~100/s).
 
+**Adressplan-Memo umgesetzt** (`88f5996`, ersetzt den Ergebnis-Memo `31ecde1`): Der Evaluator schneidet seine
+Eingaben mit (User-Data-Register, Guest-Worte) und klassifiziert sie – *strukturell* (als Operand benutzt: Bedingungen,
+Rechnungen) oder *Blatt* (Wert erreicht nur Ausgabe-Slots, auch durch Weiterreicher `ReadConst`/BitCast/Select/Phi).
+Speicher-Eingaben behalten das **Rezept ihrer Adresse** (low/high/offset/records + Immediate), sodass ein Zeiger, der
+nur als Basisadresse dient (Konstanten-Blöcke aus dem Ring-Allokator, pro Dispatch neu), sich ändern darf. Ein
+Treffer spielt die Eingaben in Auswertungsreihenfolge ab, prüft die strukturellen, berechnet Adressen neu und setzt
+die Blatt-Werte in die gespeicherten Ausgaben ein. Tests: `TestRuntimeSourcesMemo(false/true)`.
+
+| Messung (Tunnel, 25 s) | Start (Lauf 44) | jetzt (Lauf 54) |
+|---|---|---|
+| Presents | 43 (1,7 fps) | **70 (2,8 fps)** |
+| verarbeitete Draws / Dispatches | 270k / 107k | 434k / 173k |
+| Memo-Trefferquote | – | **98,6 %** (Zwischenstufe ohne Adressrezept: 68 %) |
+| `MaterializeResources` VS / CS | 17 / 26 µs | 4,0 / 14,5 µs |
+| `DrawIndex` | 45 µs | 21 µs |
+| `DispatchDirect` | 45–52 µs | 44 µs |
+
+Nächste Brocken laut Profil: `Dispatch::BindAndEmit` 29 µs × 184k (5,3 s von 25 s), `CpOpDispatchIndirect` 256 µs ×
+17,6k (4,5 s), `ExecutePreparedDraw` 9,7 µs × 440k (4,3 s), Rest von `PrepareDrawRenderState`
+(`ResolveRenderColorTarget` 5,6 µs), CS-Materialisierung trotz Treffer 14,5 µs (Uniform-Fill-Auswertung, indirekte
+Tabellen, Vektor-Kopien).
+
 **Weitere Fixes dieser Runde** (`a5b52e8`): Upload-Quelle mit entmapptem Ende (Absturz in `memcpy`, Lauf 50) → nur
 den gemappten Teil kopieren; 561-MiB-Image-Upload aus unplausiblem Deskriptor (Lauf 52) → Upload überspringen.
 
