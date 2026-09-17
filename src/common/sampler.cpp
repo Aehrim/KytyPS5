@@ -107,6 +107,10 @@ void RegisterCurrentThread() {
 	std::fprintf(stderr, "sampler: thread registered, F4 records %u seconds\n", Seconds);
 }
 
+bool Recording() noexcept {
+	return g_recording.load(std::memory_order_relaxed);
+}
+
 void Toggle() {
 	if (g_thread == nullptr) {
 		return;
@@ -124,6 +128,9 @@ void Toggle() {
 
 void RegisterCurrentThread() {}
 void Toggle() {}
+bool Recording() noexcept {
+	return false;
+}
 
 #endif
 

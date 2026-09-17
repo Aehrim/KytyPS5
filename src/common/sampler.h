@@ -11,6 +11,8 @@ namespace Common::Sampler {
 void RegisterCurrentThread();
 // Starts a recording, or stops the running one early.
 void Toggle();
+// True while a recording runs; diagnostics use it to log only the recorded window.
+[[nodiscard]] bool Recording() noexcept;
 
 } // namespace Common::Sampler
 

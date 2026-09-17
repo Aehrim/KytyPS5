@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/sampler.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -21,6 +22,7 @@
 #include <atomic>
 #include <bit>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -259,6 +261,15 @@ bool TextureCache::SafeToDownload(const Image& image) {
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
+	if (Common::Sampler::Recording()) {
+		std::fprintf(
+		    stderr,
+		    "image-insert addr=0x%llx size=0x%llx type=%u extent=%ux%ux%u levels=%u layers=%u\n",
+		    static_cast<unsigned long long>(info.data.address),
+		    static_cast<unsigned long long>(info.data.size), static_cast<uint32_t>(info.type),
+		    info.extent.width, info.extent.height, info.extent.depth, info.resources.levels,
+		    info.resources.layers);
+	}
 	m_mutation_epoch.fetch_add(1, std::memory_order_relaxed);
 	if (!info.data.Empty()) {
 		RegisterImage(id);
@@ -910,6 +921,22 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 }
 
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId source_id) {
+	if (Common::Sampler::Recording()) {
+		// Image churn diagnostic: which guest surfaces keep being recreated, and as what.
+		const auto& old = m_slot_images[source_id].info;
+		std::fprintf(
+		    stderr,
+		    "image-expand addr=0x%llx size=0x%llx->0x%llx type=%u->%u extent=%ux%ux%u->%ux%ux%u "
+		    "levels=%u->%u layers=%u->%u tile=%u->%u fmt=%u->%u\n",
+		    static_cast<unsigned long long>(info.data.address),
+		    static_cast<unsigned long long>(old.data.size),
+		    static_cast<unsigned long long>(info.data.size), static_cast<uint32_t>(old.type),
+		    static_cast<uint32_t>(info.type), old.extent.width, old.extent.height, old.extent.depth,
+		    info.extent.width, info.extent.height, info.extent.depth, old.resources.levels,
+		    info.resources.levels, old.resources.layers, info.resources.layers,
+		    static_cast<uint32_t>(old.tile_mode), static_cast<uint32_t>(info.tile_mode),
+		    static_cast<uint32_t>(old.pixel_format), static_cast<uint32_t>(info.pixel_format));
+	}
 	RefreshCopySource(source_id);
 	const auto expanded_id = InsertImage(info);
 	auto&      expanded    = m_slot_images[expanded_id];
