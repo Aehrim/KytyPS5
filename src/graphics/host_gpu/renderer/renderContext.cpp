@@ -130,10 +130,11 @@ void RenderContext::PrepareBda() {
 	// upload while no page turned CPU-dirty, no buffer was registered and no range was mapped
 	// since the previous walk. The epochs are sampled before the walk so a change during it
 	// triggers another one.
-	const auto dirty_epoch  = RegionManager::CpuDirtyEpoch().load(std::memory_order_relaxed);
-	const auto buffer_epoch = m_buffer_cache.RegistrationEpoch();
-	const auto mapped_epoch = m_mapped_ranges_epoch.load(std::memory_order_relaxed);
-	if (m_bda_synchronized && dirty_epoch == m_bda_dirty_epoch &&
+	const auto        dirty_epoch  = RegionManager::CpuDirtyEpoch().load(std::memory_order_relaxed);
+	const auto        buffer_epoch = m_buffer_cache.RegistrationEpoch();
+	const auto        mapped_epoch = m_mapped_ranges_epoch.load(std::memory_order_relaxed);
+	static const bool skip_enabled = std::getenv("KYTY_NO_BDA_SKIP") == nullptr;
+	if (skip_enabled && m_bda_synchronized && dirty_epoch == m_bda_dirty_epoch &&
 	    buffer_epoch == m_bda_buffer_epoch && mapped_epoch == m_bda_mapped_epoch) {
 		return;
 	}

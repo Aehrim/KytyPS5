@@ -381,6 +381,17 @@ Threads zu verteilen (Deskriptor-Vorbereitung parallel zur Vulkan-Aufzeichnung).
 
 **Upstream-Merge 2026-09-17:** `upstream/main` bis `ce629e0` (11 Commits: Gyro/Motion, `S_ASHR_I64`, Gather-Näherung bei Mip 0, Stencil-Zuordnung, SWAPPC-Handoffs, EXPCLEAR, Command-Buffer-Kapazität, macOS SSE4a) in den Arbeitsbranch gemergt (`78ffbed`). Einziger Konflikt: `.vscode/settings.json` (lokale Toolchain-Pfade + Qt 6.8.3 behalten, Upstreams clang-IntelliSense übernommen, `compile_commands.json` wird jetzt nach `_Build/windows` exportiert). Build und die drei Recompiler-Unit-Tests grün; Spieltest mit dem gemergten Stand steht noch aus.
 
+**Saubere Messung (Lauf 59, ohne Hintergrundlast, zwei Profile direkt nacheinander):** 95 / 97 Presents in 25 s =
+**3,8–3,9 fps**; Draw 20,0 / 19,9 µs, Dispatch 26,1 / 25,0 µs, indirekter Dispatch 70 / 60 µs – Streuung ~2 %.
+Die schwankenden Messungen davor (Läufe 55–58: 44–70 Presents) lagen an parallel laufender Last (WoW, 97 % CPU):
+der Emulator hängt an *einem* Thread und ist dafür extrem empfindlich. **Messläufe nur ohne Hintergrundlast.**
+Kontrolllauf 60 mit `KYTY_NO_MATERIALIZE_MEMO=1 KYTY_NO_BDA_SKIP=1 KYTY_NO_HOST_INDIRECT=1`: ~2,1 fps – die drei
+Optimierungen bringen zusammen ~+80 %.
+
+**Flackern/Streifen (neu beobachtet):** Texturen flackern im Tunnel, im Standbild ist ein feines senkrechtes
+Streifenmuster zu sehen. Tritt auch mit allen drei Optimierungen abgeschaltet auf (Lauf 60) → kein Cache-Artefakt,
+sondern eigenes Rendering-Thema (Verdacht: TAA-Jitter/History oder Schatten-Filter; offen, Problem 13).
+
 **Weitere Fixes dieser Runde** (`a5b52e8`): Upload-Quelle mit entmapptem Ende (Absturz in `memcpy`, Lauf 50) → nur
 den gemappten Teil kopieren; 561-MiB-Image-Upload aus unplausiblem Deskriptor (Lauf 52) → Upload überspringen.
 

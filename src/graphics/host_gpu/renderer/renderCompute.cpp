@@ -28,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -219,8 +220,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	if (indirect_args != 0) {
 		Common::LockGuard lock(m_context.GetMutex());
 		// Thread-dimension dispatches need the counts on the CPU to convert them to groups.
+		static const bool host_indirect_enabled = std::getenv("KYTY_NO_HOST_INDIRECT") == nullptr;
 		host_indirect =
-		    (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0 &&
+		    host_indirect_enabled && (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0 &&
 		    m_context.GetBufferCache().HasGpuDirtyBytes(indirect_args, 3u * sizeof(uint32_t));
 		if (!host_indirect) {
 			KYTY_PROFILER_BLOCK("DispatchIndirect::ReadArgs");
