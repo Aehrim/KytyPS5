@@ -8,6 +8,7 @@
 #include "common/threads.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
+#include "graphics/guest_gpu/gpuStateEpoch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -137,6 +138,7 @@ void GuestGpu::ProcessCommands() {
 			m_commands.pop_front();
 			EXIT_IF(m_pending_commands.fetch_sub(1, std::memory_order_acq_rel) == 0);
 		}
+		AdvanceGpuStateEpoch();
 		command();
 	}
 }
@@ -692,7 +694,28 @@ void CommandProcessor::SuspendPm4() {
 	g_current_execution->m_suspended = true;
 }
 
+// Packets that only select what the next draw renders; they leave the GPU state untouched.
+static constexpr bool IsDrawParameterPacket(uint32_t opcode, uint32_t packet_header) noexcept {
+	switch (opcode) {
+		case Pm4::IT_NOP: return KYTY_PM4_R(packet_header) == Pm4::R_ZERO;
+		case Pm4::IT_SET_BASE:
+		case Pm4::IT_INDEX_BASE:
+		case Pm4::IT_INDEX_BUFFER_SIZE:
+		case Pm4::IT_INDEX_TYPE:
+		case Pm4::IT_NUM_INSTANCES:
+		case Pm4::IT_DRAW_INDIRECT:
+		case Pm4::IT_DRAW_INDEX_INDIRECT:
+		case Pm4::IT_DRAW_INDIRECT_MULTI:
+		case Pm4::IT_DRAW_INDEX_INDIRECT_MULTI:
+		case Pm4::IT_DRAW_INDEX_2:
+		case Pm4::IT_DRAW_INDEX_OFFSET_2:
+		case Pm4::IT_DRAW_INDEX_AUTO: return true;
+		default: return false;
+	}
+}
+
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
+	AdvanceGpuStateEpoch();
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
@@ -750,6 +773,10 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			cursor.offset_dw += packet_dw;
 			execution.m_made_progress = true;
 			continue;
+		}
+
+		if (!IsDrawParameterPacket(opcode, packet_header)) {
+			AdvanceGpuStateEpoch();
 		}
 
 		auto handler = g_cp_op_func[opcode];

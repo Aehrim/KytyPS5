@@ -7,6 +7,7 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/gpuStateEpoch.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -15,6 +16,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/drawStats.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -36,6 +38,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -1062,6 +1065,60 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 	}
 }
 
+struct DrawStateCache {
+	DrawRenderState      state;
+	uint64_t             epoch        = 0; // 0: nothing cached
+	const CommandBuffer* buffer       = nullptr;
+	uint32_t             slice_offset = 0;
+};
+
+static bool DrawStateReuseEnabled() noexcept {
+	static const bool enabled = std::getenv("KYTY_NO_DRAW_STATE_REUSE") == nullptr;
+	return enabled;
+}
+
+DrawRenderState* RenderExecutor::AcquireDrawRenderState(CommandBuffer&      buffer,
+                                                        const DrawCallInfo& draw,
+                                                        uint32_t render_target_slice_offset) {
+	if (!m_draw_state_cache) {
+		m_draw_state_cache = std::make_shared<DrawStateCache>();
+	}
+	auto&      cache = *m_draw_state_cache;
+	const auto epoch = GpuStateEpoch().load(std::memory_order_relaxed);
+	if (cache.epoch == epoch && cache.buffer == &buffer &&
+	    cache.slice_offset == render_target_slice_offset && DrawStateReuseEnabled() &&
+	    DrawStats::FastPaths().load(std::memory_order_relaxed)) {
+		// Same registers and user data as the previous draw: shaders, descriptors and target
+		// descriptions are unchanged. Only the per-draw target binding marks were reset.
+		auto& images = m_context.GetTextureCache().m_slot_images;
+		auto& state  = cache.state;
+		bool  alive =
+		    !state.depth_info.image_id || images.try_get(state.depth_info.image_id) != nullptr;
+		for (uint32_t i = 0; alive && i < state.color_count; i++) {
+			alive = images.try_get(state.color_info[i].image_id) != nullptr;
+		}
+		if (alive) {
+			KYTY_PROFILER_BLOCK("Draw::ReuseRenderState");
+			for (uint32_t i = 0; i < state.color_count; i++) {
+				BindRenderTarget(state.color_info[i].image_id);
+			}
+			if (state.depth_info.image_id) {
+				BindRenderTarget(state.depth_info.image_id);
+			}
+			return &state;
+		}
+	}
+	cache.epoch = 0;
+	cache.state = {};
+	if (!PrepareDrawRenderState(buffer, draw, render_target_slice_offset, cache.state)) {
+		return nullptr;
+	}
+	cache.epoch        = epoch;
+	cache.buffer       = &buffer;
+	cache.slice_offset = render_target_slice_offset;
+	return &cache.state;
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -1149,6 +1206,69 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		    buffer, state.ps_active ? &state.ps_input_info : nullptr, topology,
 		    primitive_restart_enable, state.programs);
 	}();
+	if (DrawStats::Enabled()) {
+		using DrawStats::Part;
+		DrawStats::Parts parts {};
+		const auto       set = [&parts](Part part, const DrawStats::Fingerprint& value) {
+			parts[static_cast<size_t>(part)] = value.Value();
+		};
+		DrawStats::Fingerprint programs;
+		for (const auto& stage: vertex_stages) {
+			programs.Add(reinterpret_cast<uint64_t>(stage.stage.program));
+		}
+		programs.Add(state.ps_active ? reinterpret_cast<uint64_t>(state.ps_input_info.stage.program)
+		                             : 0u);
+		set(Part::Programs, programs);
+		DrawStats::Fingerprint targets;
+		for (uint32_t i = 0; i < state.color_count; i++) {
+			targets.Add(state.color_info[i].image_id.index);
+		}
+		targets.Add(state.depth_info.image_id ? state.depth_info.image_id.index + 1ull : 0ull);
+		set(Part::Targets, targets);
+		DrawStats::Fingerprint pipeline_id;
+		pipeline_id.Add(reinterpret_cast<uint64_t>(&pipeline));
+		set(Part::Pipeline, pipeline_id);
+		DrawStats::Fingerprint vertex;
+		for (uint32_t i = 0; i < vertex_bindings.count; i++) {
+			vertex.Add(
+			    reinterpret_cast<uint64_t>(static_cast<VkBuffer>(vertex_bindings.buffers[i])));
+			vertex.Add(vertex_bindings.offsets[i]);
+		}
+		set(Part::VertexBuffers, vertex);
+		DrawStats::Fingerprint index;
+		index.Add(reinterpret_cast<uint64_t>(static_cast<VkBuffer>(index_binding.buffer)));
+		index.Add(index_binding.offset);
+		set(Part::IndexBuffer, index);
+		DrawStats::Fingerprint buffers;
+		DrawStats::Fingerprint images;
+		DrawStats::Fingerprint samplers;
+		DrawStats::Fingerprint shader_data;
+		for (const auto* prepared: stages) {
+			for (const auto& source: prepared->buffer_sources) {
+				buffers.Add(source.address);
+				buffers.Add(source.size);
+			}
+			for (const auto& image: prepared->images) {
+				images.Add(reinterpret_cast<uint64_t>(static_cast<VkImageView>(image.image_view)));
+			}
+			for (const auto& sampler: prepared->samplers) {
+				samplers.Add(reinterpret_cast<uint64_t>(static_cast<VkSampler>(sampler)));
+			}
+			shader_data.AddBytes(prepared->shader_data.data(),
+			                     prepared->shader_data.size() * sizeof(uint32_t));
+		}
+		set(Part::Buffers, buffers);
+		set(Part::Images, images);
+		set(Part::Samplers, samplers);
+		set(Part::ShaderData, shader_data);
+		DrawStats::Fingerprint descriptors;
+		descriptors.Add(buffers.Value());
+		descriptors.Add(images.Value());
+		descriptors.Add(samplers.Value());
+		descriptors.Add(shader_data.Value());
+		set(Part::AllDescriptors, descriptors);
+		DrawStats::Record(parts);
+	}
 	KYTY_PROFILER_BLOCK("Draw::CommitAndEmit");
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
@@ -1229,6 +1349,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
+	const DrawStats::DrawTimer draw_timer;
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
@@ -1317,11 +1438,13 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count, args.instance_count,
 	                         args.first_instance};
-	DrawRenderState    state {};
-	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+	auto* const        prepared_state =
+	    AcquireDrawRenderState(buffer, draw, args.render_target_slice_offset);
+	if (prepared_state == nullptr) {
 		ResetBindings();
 		return;
 	}
+	auto& state = *prepared_state;
 
 	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size, args.index_addr);
 
@@ -1398,11 +1521,13 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		ResetBindings();
 		return;
 	}
-	DrawRenderState state {};
-	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+	auto* const prepared_state =
+	    AcquireDrawRenderState(buffer, draw, args.render_target_slice_offset);
+	if (prepared_state == nullptr) {
 		ResetBindings();
 		return;
 	}
+	auto& state = *prepared_state;
 
 	const bool rect_list = ucfg.GetPrimType() == Prospero::PrimitiveType::kRectList;
 	if (rect_list && state.vertex_info[0].buffers_num == 0 &&

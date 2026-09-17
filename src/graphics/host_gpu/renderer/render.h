@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -31,6 +32,7 @@ struct DrawCallInfo;
 struct DrawEmitInfo;
 struct DrawIndexBufferSource;
 struct DrawRenderState;
+struct DrawStateCache;
 class RenderContext;
 class CommandScheduler;
 struct RenderExecutorTestAccess;
@@ -186,6 +188,11 @@ private:
 	                              bool ignore_target_mask = false, bool exact_format = false);
 	void ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& target);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
+	// Returns the render state of this draw, reusing the previous draw's state while the
+	// GPU state epoch stands still. Null when the draw has nothing to render into.
+	[[nodiscard]] DrawRenderState* AcquireDrawRenderState(CommandBuffer&      buffer,
+	                                                      const DrawCallInfo& draw,
+	                                                      uint32_t render_target_slice_offset);
 	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                          uint32_t         render_target_slice_offset,
 	                                          DrawRenderState& state);
@@ -211,6 +218,7 @@ private:
 
 	RenderContext&                        m_context;
 	std::vector<ImageId>                  m_bound_images;
+	std::shared_ptr<DrawStateCache>       m_draw_state_cache;
 	std::vector<vk::DescriptorBufferInfo> m_descriptor_buffers;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;

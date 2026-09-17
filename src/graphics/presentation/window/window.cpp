@@ -28,6 +28,7 @@
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/drawStats.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -251,6 +252,14 @@ static void GameEventKeyboard(WindowLoopState& game, const EventKeyboard& key) {
 					const bool enabled = !Libs::g_trace_all_calls.load();
 					Libs::g_trace_all_calls.store(enabled);
 					LOGF("HLE call trace %s\n", enabled ? "enabled" : "disabled");
+				}
+				break;
+			case SDLK_F3:
+				if (!key.repeat) {
+					auto&      fast    = Libs::Graphics::DrawStats::FastPaths();
+					const bool enabled = !fast.load();
+					fast.store(enabled);
+					LOGF("Renderer fast paths %s\n", enabled ? "enabled" : "disabled");
 				}
 				break;
 			case SDLK_F11:
