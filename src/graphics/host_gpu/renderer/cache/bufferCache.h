@@ -58,7 +58,9 @@ public:
 	[[nodiscard]] Buffer*       GetBdaPageTableBuffer() noexcept { return &m_bda_pagetable_buffer; }
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
 	[[nodiscard]] Buffer* GetNanTraceBuffer() noexcept { return &m_nan_trace_buffer; }
-	void                  ProcessNanTrace();
+	// Changes whenever a buffer is registered or unregistered.
+	[[nodiscard]] uint64_t RegistrationEpoch() const noexcept { return m_registration_epoch; }
+	void                   ProcessNanTrace();
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
@@ -114,6 +116,7 @@ private:
 	FaultManager                                       m_fault_manager;
 	Buffer                                             m_gds_buffer;
 	Buffer                                             m_nan_trace_buffer;
+	uint64_t                                           m_registration_epoch = 0;
 	std::vector<uint8_t>                               m_nan_trace_seen;
 	Buffer                                             m_bda_pagetable_buffer;
 	Common::SlotVector<Buffer>                         m_slot_buffers;

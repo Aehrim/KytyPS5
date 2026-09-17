@@ -91,10 +91,18 @@ public:
 		return RegionBits(bits, start, end).Any();
 	}
 
+	// Counts every transition of pages to CPU-dirty. While it stands still no tracked page needs
+	// an upload that an earlier full synchronization has not already performed.
+	[[nodiscard]] static std::atomic<uint64_t>& CpuDirtyEpoch() {
+		static std::atomic<uint64_t> epoch {0};
+		return epoch;
+	}
+
 	template <DirtySource source, bool enable>
 	void ChangeState(uint64_t vaddr, uint64_t size) {
 		const auto [start, end] = GetPageRange(vaddr, size);
 		if constexpr (source == DirtySource::Cpu && enable) {
+			CpuDirtyEpoch().fetch_add(1, std::memory_order_relaxed);
 			if (RegionBits(m_gpu_dirty, start, end).Any()) {
 				EXIT("CPU dirty state conflicts with GPU dirty state\n");
 			}
