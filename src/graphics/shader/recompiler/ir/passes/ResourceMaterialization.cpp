@@ -354,7 +354,7 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 } // namespace
 
 static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& runtime,
-                                MaterializedSnapshot& snapshot) {
+                                MaterializedSnapshot& snapshot, RuntimeSourcesMemo* memo) {
 	if (!program.resource_tracking_complete) {
 		return false;
 	}
@@ -366,7 +366,7 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 	std::vector<uint32_t>        flattened_srt;
 	std::vector<uint8_t>         active_sources;
 	if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
-	                            flattened_srt, program.clean_flat_slots, active_sources)) {
+	                            flattened_srt, program.clean_flat_slots, active_sources, memo)) {
 		return false;
 	}
 
@@ -1095,9 +1095,10 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 }
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                          RuntimeSourcesMemo* memo) {
 	MaterializedSnapshot materialized;
-	if (!MaterializeSnapshot(program, runtime, materialized)) {
+	if (!MaterializeSnapshot(program, runtime, materialized, memo)) {
 		return false;
 	}
 	return BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization);

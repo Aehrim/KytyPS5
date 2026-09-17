@@ -42,7 +42,8 @@ ResourcePlan ExtractResourcePlan(const Program& program);
 // Resolves and specializes the immutable resource plan in one transaction. On failure both
 // destinations are unchanged.
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                          RuntimeSourcesMemo* memo = nullptr);
 
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);

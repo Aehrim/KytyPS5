@@ -140,6 +140,102 @@ Libs::Graphics::ShaderRecompiler::IR::ResourcePlan MixedSamplerPlan() {
   return ExtractResourcePlan(program);
 }
 
+// A pointer cell selects which value cell the second SRT read loads; both reads are flat slots.
+// With computed_address the pointer passes through an add, which makes it a structural input.
+Libs::Graphics::ShaderRecompiler::IR::ResourcePlan
+NestedSrtPlan(const uint32_t *pointer_cell, bool computed_address) {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  auto &value_block = AddValueBlock(program);
+
+  MemoryInfo memory;
+  memory.kind = ResourceKind::ScalarAddress;
+  memory.planning_only = true;
+  program.memory_info.push_back(memory);
+  const auto address = reinterpret_cast<uint64_t>(pointer_cell);
+  const auto high = Value(static_cast<uint32_t>(address >> 32u));
+  auto &pointer_handle = value_block.AppendNewInst(
+      ValueOpcode::GetAddressResource,
+      {Value(static_cast<uint32_t>(address)), high});
+  auto &pointer = value_block.AppendNewInst(
+      ValueOpcode::LoadAddressU32,
+      {Value(&pointer_handle), Value(0u), Value(0u), Value(true)});
+  pointer.SetFlags(MemoryFlags{.index = 0, .pc = 0x40});
+  auto base = Value(&pointer);
+  if (computed_address) {
+    base = Value(&value_block.AppendNewInst(ValueOpcode::IAdd32,
+                                            {Value(&pointer), Value(0u)}));
+  }
+  auto &value_handle = value_block.AppendNewInst(
+      ValueOpcode::GetAddressResource, {base, high});
+  auto &value = value_block.AppendNewInst(
+      ValueOpcode::LoadAddressU32,
+      {Value(&value_handle), Value(0u), Value(0u), Value(true)});
+  value.SetFlags(MemoryFlags{.index = 0, .pc = 0x48});
+  program.srt_reads.push_back({Value(&pointer), 0});
+  program.srt_reads.push_back({Value(&value), 1});
+  return ExtractResourcePlan(program);
+}
+
+void TestRuntimeSourcesMemo(bool computed_address) {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  static uint32_t cells[3] = {0, 0, 0};
+  const auto low = [](const uint32_t *cell) {
+    return static_cast<uint32_t>(reinterpret_cast<uint64_t>(cell));
+  };
+  cells[0] = low(&cells[1]);
+  cells[1] = 0xabcdef01u;
+  cells[2] = 0x22222222u;
+  auto plan = NestedSrtPlan(&cells[0], computed_address);
+  RuntimeSourcesMemo memo;
+  (void)TakeRuntimeSourcesMemoStats();
+  const auto flattened = [&] {
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    Check(MaterializeResources(plan, {}, snapshot, specialization, &memo),
+          "memoized materialization failed");
+    return snapshot.flattened_srt;
+  };
+
+  Check(flattened() == std::vector<uint32_t>({low(&cells[1]), 0xabcdef01u}),
+        "recording pass returned wrong flattened values");
+  auto stats = TakeRuntimeSourcesMemoStats();
+  Check(stats.misses == 1u && stats.hits == 0u && stats.uncacheable == 0u &&
+            memo.entries.size() == 1u && memo.entries[0].inputs.size() == 2u &&
+            memo.entries[0].inputs[0].structural == computed_address &&
+            !memo.entries[0].inputs[1].structural,
+        "inputs of the nested read were classified incorrectly");
+
+  cells[1] = 0x11111111u;
+  Check(flattened() == std::vector<uint32_t>({low(&cells[1]), 0x11111111u}),
+        "memo hit did not refresh the leaf value");
+  stats = TakeRuntimeSourcesMemoStats();
+  Check(stats.hits == 1u && stats.misses == 0u,
+        "changed leaf value was not served from the memo");
+
+  // A pointer that only locates the second read relocates it on a hit; a pointer that went
+  // through arithmetic is structural and forces a new evaluation.
+  cells[0] = low(&cells[2]);
+  Check(flattened() == std::vector<uint32_t>({low(&cells[2]), 0x22222222u}),
+        "changed pointer produced stale values");
+  stats = TakeRuntimeSourcesMemoStats();
+  Check(computed_address ? (stats.hits == 0u && stats.misses == 1u &&
+                            memo.entries.size() == 2u)
+                         : (stats.hits == 1u && stats.misses == 0u &&
+                            memo.entries.size() == 1u),
+        "changed pointer took the wrong memo path");
+
+  cells[0] = low(&cells[1]);
+  cells[1] = 0x33333333u;
+  Check(flattened() == std::vector<uint32_t>({low(&cells[1]), 0x33333333u}),
+        "restored pointer did not refresh the value");
+  stats = TakeRuntimeSourcesMemoStats();
+  Check(stats.hits == 1u, "restored pointer missed the memo");
+}
+
 void TestMappedSrtUsesDirectReaderByDefault() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   const uint32_t dword = 0x12345678;
@@ -266,6 +362,8 @@ void DbgExit(int) { std::abort(); }
 
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
+  TestRuntimeSourcesMemo(false);
+  TestRuntimeSourcesMemo(true);
   TestIntegerRuntimeValueFollowsSrtReads();
   TestUnbasedFlatCacheHitMaterializes();
   TestFailedMaterializationPreservesPriorStage();

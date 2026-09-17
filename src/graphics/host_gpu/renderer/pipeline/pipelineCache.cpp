@@ -95,53 +95,10 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	Log::WriteToConsoleAndLog(message);
 }
 
-bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
-	return value != nullptr &&
-	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
-}
-
-// Resource materialization is a pure function of the user data and of the guest words it reads.
-// Recording those words lets a later draw with the same user data revalidate a stored result
-// with a few compares instead of walking the descriptor graph again.
-struct MaterializeMemoStats {
-	std::atomic<uint64_t> lookups {0};
-	std::atomic<uint64_t> hits {0};
-	std::atomic<uint64_t> user_data_misses {0};
-	std::atomic<uint64_t> read_misses {0};
-	std::atomic<uint64_t> unrecordable {0};
-	std::atomic<uint64_t> recorded_reads {0};
-	std::atomic<uint64_t> recorded {0};
-};
-MaterializeMemoStats g_memo_stats;
-
-struct MaterializeRead {
-	uint64_t address = 0;
-	uint32_t value   = 0;
-	bool     clean   = false;
-
-	bool operator==(const MaterializeRead&) const = default;
-};
-
-struct MaterializeRecorder {
-	std::vector<MaterializeRead> reads;
-	bool                         failed = false;
-};
-
-bool RecordRawGuestRead(void* userdata, uint64_t address, uint32_t* value) {
-	// Same semantics as the SRT walker's direct read when no reader is installed.
-	std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
-	static_cast<MaterializeRecorder*>(userdata)->reads.push_back({address, *value, false});
-	return true;
-}
-
-bool RecordCleanGuestRead(void* userdata, uint64_t address, uint32_t* value) {
-	auto* recorder = static_cast<MaterializeRecorder*>(userdata);
-	if (!ReadShaderGuestMemory(nullptr, address, value)) {
-		recorder->failed = true;
-		return false;
-	}
-	recorder->reads.push_back({address, *value, true});
-	return true;
+// KYTY_NO_MATERIALIZE_MEMO disables the runtime-source memo, KYTY_MEMO_STATS logs its hit rate.
+bool MaterializeMemoEnabled() {
+	static const bool enabled = std::getenv("KYTY_NO_MATERIALIZE_MEMO") == nullptr;
+	return enabled;
 }
 
 void ReportMaterializeMemoStats() {
@@ -154,19 +111,18 @@ void ReportMaterializeMemoStats() {
 	if (now - last < std::chrono::seconds(10)) {
 		return;
 	}
-	last                = now;
-	const auto recorded = g_memo_stats.recorded.exchange(0);
-	LOGF("materialize memo: lookups=%" PRIu64 " hits=%" PRIu64 " user_data_miss=%" PRIu64
-	     " read_miss=%" PRIu64 " unrecordable=%" PRIu64 " reads_per_record=%" PRIu64 "\n",
-	     g_memo_stats.lookups.exchange(0), g_memo_stats.hits.exchange(0),
-	     g_memo_stats.user_data_misses.exchange(0), g_memo_stats.read_misses.exchange(0),
-	     g_memo_stats.unrecordable.exchange(0),
-	     g_memo_stats.recorded_reads.exchange(0) / std::max<uint64_t>(recorded, 1));
+	last              = now;
+	const auto stats  = ShaderRecompiler::IR::TakeRuntimeSourcesMemoStats();
+	const auto misses = std::max<uint64_t>(stats.misses, 1);
+	LOGF("runtime source memo: hits=%" PRIu64 " misses=%" PRIu64 " uncacheable=%" PRIu64
+	     " structural/miss=%" PRIu64 " leaves/miss=%" PRIu64 "\n",
+	     stats.hits, stats.misses, stats.uncacheable, stats.structural / misses,
+	     stats.leaves / misses);
 }
 
-bool MaterializeMemoEnabled() {
-	static const bool enabled = std::getenv("KYTY_NO_MATERIALIZE_MEMO") == nullptr;
-	return enabled;
+bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
+	return value != nullptr &&
+	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
@@ -272,76 +228,9 @@ struct PipelineCache::ProgramCache {
 			permutations.reserve(8);
 		}
 
-		struct Memo {
-			std::vector<uint32_t>                        user_data;
-			uint64_t                                     key         = 0;
-			uint64_t                                     shader_base = 0;
-			std::vector<MaterializeRead>                 reads;
-			ShaderRecompiler::IR::ResourceSnapshot       resources;
-			ShaderRecompiler::IR::ResourceSpecialization specialization;
-			size_t                                       permutation = SIZE_MAX;
-		};
-
-		// Returns the stored result whose inputs still hold, or nullptr.
-		[[nodiscard]] static uint64_t MemoKey(std::span<const uint32_t> user_data,
-		                                      uint64_t                  shader_base) {
-			uint64_t key = shader_base ^ 0x9e3779b97f4a7c15ull;
-			for (const auto word: user_data) {
-				key = (key ^ word) * 0x100000001b3ull;
-			}
-			return key;
-		}
-
-		[[nodiscard]] Memo* FindMemo(std::span<const uint32_t> user_data, uint64_t shader_base) {
-			g_memo_stats.lookups++;
-			bool       user_data_matched = false;
-			const auto key               = MemoKey(user_data, shader_base);
-			for (auto& memo: memos) {
-				if (memo.key != key || memo.shader_base != shader_base ||
-				    memo.user_data.size() != user_data.size() ||
-				    std::memcmp(memo.user_data.data(), user_data.data(),
-				                user_data.size() * sizeof(uint32_t)) != 0) {
-					continue;
-				}
-				user_data_matched = true;
-				bool valid        = true;
-				for (const auto& read: memo.reads) {
-					uint32_t word = 0;
-					if (read.clean) {
-						valid = ReadShaderGuestMemory(nullptr, read.address, &word);
-					} else {
-						std::memcpy(&word, reinterpret_cast<const void*>(read.address),
-						            sizeof(word));
-					}
-					if (!valid || word != read.value) {
-						valid = false;
-						break;
-					}
-				}
-				if (valid) {
-					g_memo_stats.hits++;
-					return &memo;
-				}
-			}
-			(user_data_matched ? g_memo_stats.read_misses : g_memo_stats.user_data_misses)++;
-			return nullptr;
-		}
-
-		Memo& StoreMemo() {
-			constexpr size_t MaxMemos = 256;
-			if (memos.size() < MaxMemos) {
-				return memos.emplace_back();
-			}
-			auto& memo = memos[next_memo];
-			next_memo  = (next_memo + 1u) % MaxMemos;
-			memo       = {};
-			return memo;
-		}
-
-		ShaderRecompiler::IR::ResourcePlan resource_plan;
-		std::vector<Permutation>           permutations;
-		std::vector<Memo>                  memos;
-		size_t                             next_memo = 0;
+		ShaderRecompiler::IR::ResourcePlan       resource_plan;
+		std::vector<Permutation>                 permutations;
+		ShaderRecompiler::IR::RuntimeSourcesMemo sources_memo;
 	};
 
 	struct ProgramKeyHash {
@@ -429,58 +318,12 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
-			SourceEntry::Memo* memo = nullptr;
-			if (MaterializeMemoEnabled()) {
-				ReportMaterializeMemoStats();
-				KYTY_PROFILER_BLOCK("Shader::MemoLookup");
-				memo = entry->second.FindMemo(params.user_data, params.Base());
-			}
-			if (memo != nullptr) {
-				KYTY_PROFILER_BLOCK("Shader::MemoHit");
-				if (memo->permutation < entry->second.permutations.size()) {
-					auto&       permutation = entry->second.permutations[memo->permutation];
-					const auto& layout      = permutation.program.bindings;
-					if (layout.push_data_start_dword ==
-					    ShaderRecompiler::IR::PushData::StartFor(push_data_cursor,
-					                                             layout.ShaderDataDwords())) {
-						input_info.stage = {.program   = &permutation.program,
-						                    .resources = memo->resources};
-						permutation.program.bindings.AdvancePushData(push_data_cursor);
-						return permutation.handle;
-					}
-				}
-				resources      = memo->resources;
-				specialization = memo->specialization;
-			} else {
+			{
 				KYTY_PROFILER_BLOCK("Shader::MaterializeResources");
-				MaterializeRecorder recorder;
-				auto                recording = runtime;
-				if (MaterializeMemoEnabled()) {
-					recording.userdata                   = &recorder;
-					recording.read_memory                = RecordRawGuestRead;
-					recording.read_specialization_memory = RecordCleanGuestRead;
-				}
+				ReportMaterializeMemoStats();
 				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-				    entry->second.resource_plan, recording, resources, specialization));
-				if (MaterializeMemoEnabled() && recorder.failed) {
-					g_memo_stats.unrecordable++;
-				}
-				if (MaterializeMemoEnabled() && !recorder.failed) {
-					g_memo_stats.recorded++;
-					g_memo_stats.recorded_reads += recorder.reads.size();
-					std::ranges::sort(recorder.reads, [](const auto& lhs, const auto& rhs) {
-						return std::tie(lhs.address, lhs.clean) < std::tie(rhs.address, rhs.clean);
-					});
-					const auto duplicates = std::ranges::unique(recorder.reads);
-					recorder.reads.erase(duplicates.begin(), duplicates.end());
-					memo = &entry->second.StoreMemo();
-					memo->user_data.assign(params.user_data.begin(), params.user_data.end());
-					memo->shader_base    = params.Base();
-					memo->key            = SourceEntry::MemoKey(params.user_data, params.Base());
-					memo->reads          = std::move(recorder.reads);
-					memo->resources      = resources;
-					memo->specialization = specialization;
-				}
+				    entry->second.resource_plan, runtime, resources, specialization,
+				    MaterializeMemoEnabled() ? &entry->second.sources_memo : nullptr));
 			}
 			KYTY_PROFILER_BLOCK("Shader::FindPermutation");
 			if (const auto permutation = std::ranges::find_if(
@@ -493,10 +336,6 @@ struct PipelineCache::ProgramCache {
 				               candidate.specialization == specialization;
 			        });
 			    permutation != entry->second.permutations.end()) {
-				if (memo != nullptr) {
-					memo->permutation =
-					    static_cast<size_t>(permutation - entry->second.permutations.begin());
-				}
 				input_info.stage = {.program   = &permutation->program,
 				                    .resources = std::move(resources)};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);

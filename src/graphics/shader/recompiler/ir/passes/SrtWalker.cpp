@@ -59,6 +59,31 @@ bool AddSignedAddress(uint64_t base, int64_t offset, uint64_t& result) {
 	return true;
 }
 
+// Address of a raw SRT read. Shared by the evaluator and the memo so both always agree.
+bool ComputeRawReadAddress(bool buffer, uint64_t low, uint64_t high, uint64_t offset,
+                           uint64_t records, int64_t immediate, uint64_t& address) {
+	const auto base = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
+	if (buffer) {
+		if (immediate < 0) {
+			return false;
+		}
+		const auto byte_offset = static_cast<uint64_t>(immediate) + static_cast<uint32_t>(offset);
+		const auto aligned     = byte_offset & ~uint64_t {3};
+		const auto stride      = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
+		const auto size = stride == 0u
+		                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
+		                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
+		if (aligned > size || size - aligned < sizeof(uint32_t)) {
+			return false;
+		}
+		address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
+		return true;
+	}
+	const auto relative =
+	    (immediate & ~int64_t {3}) + static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
+	return AddSignedAddress(base & ~uint64_t {3}, relative, address);
+}
+
 bool IsRawRead(const ResourcePlan& values, const Inst& inst) {
 	const auto op = inst.GetOpcode();
 	if (op != ValueOpcode::LoadAddressU32 && op != ValueOpcode::ReadConstBuffer) {
@@ -462,12 +487,14 @@ private:
 // generation stamp instead of being cleared.
 struct EvaluatorScratch {
 	std::vector<uint64_t> values;
+	std::vector<int32_t>  inputs;
 	std::vector<uint32_t> stamps;
 	uint32_t              generation = 0;
 
 	void Begin(size_t size) {
 		if (values.size() < size) {
 			values.resize(size);
+			inputs.resize(size, -1);
 			stamps.resize(size, 0u);
 		}
 		if (++generation == 0u) {
@@ -494,13 +521,30 @@ public:
 
 	Evaluator(const ResourcePlan& program, const SrtRuntime& runtime,
 	          std::span<const uint8_t> clean_flat_slots = {}, Evaluator* clean_evaluator = nullptr,
-	          Value active_mask = {})
+	          Value active_mask = {}, RuntimeInputTrace* trace = nullptr, bool clean = false)
 	    : m_program(program), m_runtime(runtime), m_clean_flat_slots(clean_flat_slots),
-	      m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()) {}
+	      m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()), m_trace(trace),
+	      m_clean(clean) {}
+
+	// How the caller uses an evaluated value. An input that only reaches an Output (possibly
+	// through Forward steps) is a leaf; an input used as an Operand shapes the evaluation.
+	enum class Use { Output, Operand, Forward };
 
 	bool Evaluate(Value value, uint32_t& result) {
 		uint64_t wide = 0;
-		if (!EvaluateWide(value, wide)) {
+		if (!EvaluateWide(value, wide, Use::Operand)) {
+			return false;
+		}
+		result = static_cast<uint32_t>(wide);
+		return true;
+	}
+
+	// Traced evaluation of an output slot. The input parameter receives the trace input the
+	// value is a plain copy of, or -1.
+	bool EvaluateOutput(Value value, uint32_t& result, int32_t& input) {
+		uint64_t wide = 0;
+		input         = -1;
+		if (!EvaluateWide(value, wide, Use::Output, &input)) {
 			return false;
 		}
 		result = static_cast<uint32_t>(wide);
@@ -514,7 +558,11 @@ private:
 
 	static uint64_t Float32Bits(float value) { return std::bit_cast<uint32_t>(value); }
 
-	bool EvaluateWide(Value value, uint64_t& result) {
+	bool EvaluateWide(Value value, uint64_t& result, Use use = Use::Operand,
+	                  int32_t* input_out = nullptr) {
+		if (input_out != nullptr) {
+			*input_out = -1;
+		}
 		value = value.Resolve();
 		if (value.IsImmediate()) {
 			switch (value.GetType()) {
@@ -545,46 +593,76 @@ private:
 		}
 		const auto index = inst->EvaluationIndex();
 		const bool dense = index < m_scratch->values.size();
+		if (!dense && m_trace != nullptr) {
+			m_trace->cacheable = false;
+		}
+		const auto finish = [&](int32_t input) {
+			if (input >= 0 && m_trace != nullptr && use == Use::Operand) {
+				m_trace->inputs[static_cast<size_t>(input)].structural = true;
+			}
+			if (input_out != nullptr) {
+				*input_out = input;
+			}
+			return true;
+		};
 		if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) &&
 		    inst->NumArgs() == 3 && inst->Arg(0).Resolve() == m_active_mask) {
-			return EvaluateWide(inst->Arg(1), result);
+			int32_t forwarded = -1;
+			if (!EvaluateWide(inst->Arg(1), result, Use::Forward, &forwarded)) {
+				return false;
+			}
+			return finish(forwarded);
 		}
 		if (dense) {
 			if (m_scratch->stamps[index] == m_scratch->generation) {
 				result = m_scratch->values[index];
-				return true;
+				return finish(m_scratch->inputs[index]);
 			}
 		} else if (const auto found = m_cache.find(inst); found != m_cache.end()) {
 			result = found->second;
-			return true;
+			return finish(-1);
 		}
 		if (std::ranges::find(m_visiting, inst) != m_visiting.end()) {
 			return false;
 		}
 		m_visiting.push_back(inst);
 		uint64_t   out       = 0;
-		const bool evaluated = EvaluateInst(*inst, out);
+		int32_t    input     = -1;
+		const bool evaluated = EvaluateInst(*inst, out, input);
 		m_visiting.pop_back();
 		if (!evaluated) {
 			return false;
 		}
 		if (dense) {
 			m_scratch->values[index] = out;
+			m_scratch->inputs[index] = input;
 			m_scratch->stamps[index] = m_scratch->generation;
 		} else {
 			m_cache.emplace(inst, out);
 		}
 		result = out;
-		return true;
+		return finish(input);
+	}
+
+	int32_t RecordInput(RuntimeInputTrace::Kind kind, uint64_t location, uint32_t value) {
+		if (m_trace == nullptr) {
+			return -1;
+		}
+		RuntimeInputTrace::Input record;
+		record.kind     = kind;
+		record.value    = value;
+		record.location = location;
+		m_trace->inputs.push_back(record);
+		return static_cast<int32_t>(m_trace->inputs.size() - 1u);
 	}
 
 	bool Arg(const Inst& inst, size_t index, uint64_t& result) {
 		return EvaluateWide(inst.Arg(index), result);
 	}
 
-	bool EvaluatePhi(const Inst& inst, uint64_t& result) {
+	bool EvaluatePhi(const Inst& inst, uint64_t& result, int32_t& input) {
 		const auto value = ResolveInvariantPhi(m_program, Value(const_cast<Inst*>(&inst)));
-		return !value.IsEmpty() && EvaluateWide(value, result);
+		return !value.IsEmpty() && EvaluateWide(value, result, Use::Forward, &input);
 	}
 
 	bool EvaluateExtract(const Inst& inst, uint64_t& result) {
@@ -626,7 +704,7 @@ private:
 		return false;
 	}
 
-	bool EvaluateRawRead(const Inst& inst, uint64_t& result) {
+	bool EvaluateRawRead(const Inst& inst, uint64_t& result, int32_t& input) {
 		const auto flags = inst.Flags<MemoryFlags>();
 		if (flags.index >= m_program.memory_info.size()) {
 			return false;
@@ -636,41 +714,29 @@ private:
 		if (handle == nullptr) {
 			return false;
 		}
-		uint64_t low    = 0;
-		uint64_t high   = 0;
-		uint64_t offset = 0;
-		if (!Arg(*handle, 0, low) || !Arg(*handle, 1, high) || !Arg(inst, 1, offset)) {
+		// Address operands are taken as Forward uses: a pointer that only locates this read does
+		// not shape the evaluation, the memo recomputes the address from its current value.
+		std::array<uint64_t, 4> values {};
+		std::array<int32_t, 4>  sources {-1, -1, -1, -1};
+		if (!EvaluateWide(handle->Arg(0), values[0], Use::Forward, &sources[0]) ||
+		    !EvaluateWide(handle->Arg(1), values[1], Use::Forward, &sources[1]) ||
+		    !EvaluateWide(inst.Arg(1), values[2], Use::Forward, &sources[2])) {
 			return false;
 		}
-		const auto base      = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
+		const bool buffer    = inst.GetOpcode() == ValueOpcode::ReadConstBuffer;
 		const auto immediate = static_cast<int64_t>(static_cast<int32_t>(mem.offset));
-		uint64_t   address   = 0;
-		if (inst.GetOpcode() == ValueOpcode::ReadConstBuffer) {
-			uint64_t records = 0;
-			uint64_t word3   = 0;
-			if (handle->NumArgs() != 4u || !Arg(*handle, 2, records) || !Arg(*handle, 3, word3)) {
+		if (buffer) {
+			uint64_t word3 = 0;
+			if (handle->NumArgs() != 4u ||
+			    !EvaluateWide(handle->Arg(2), values[3], Use::Forward, &sources[3]) ||
+			    !Arg(*handle, 3, word3)) {
 				return false;
 			}
-			if (immediate < 0) {
-				return false;
-			}
-			const auto byte_offset =
-			    static_cast<uint64_t>(immediate) + static_cast<uint32_t>(offset);
-			const auto aligned = byte_offset & ~uint64_t {3};
-			const auto stride  = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
-			const auto size = stride == 0u
-			                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
-			                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
-			if (aligned > size || size - aligned < sizeof(uint32_t)) {
-				return false;
-			}
-			address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
-		} else {
-			const auto relative = (immediate & ~int64_t {3}) +
-			                      static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
-			if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
-				return false;
-			}
+		}
+		uint64_t address = 0;
+		if (!ComputeRawReadAddress(buffer, values[0], values[1], values[2], values[3], immediate,
+		                           address)) {
+			return false;
 		}
 		uint32_t word = 0;
 		if (m_runtime.read_memory != nullptr) {
@@ -680,11 +746,22 @@ private:
 		} else {
 			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
 		}
+		input = RecordInput(m_clean ? RuntimeInputTrace::Kind::CleanMemory
+		                            : RuntimeInputTrace::Kind::RawMemory,
+		                    address, word);
+		if (input >= 0) {
+			auto& record     = m_trace->inputs[static_cast<size_t>(input)];
+			record.buffer    = buffer;
+			record.immediate = immediate;
+			for (size_t index = 0; index < values.size(); index++) {
+				record.operands[index] = {sources[index], values[index]};
+			}
+		}
 		result = word;
 		return true;
 	}
 
-	bool EvaluateInst(const Inst& inst, uint64_t& result) {
+	bool EvaluateInst(const Inst& inst, uint64_t& result, int32_t& input) {
 		uint64_t   a       = 0;
 		uint64_t   b       = 0;
 		uint64_t   c       = 0;
@@ -700,19 +777,23 @@ private:
 					return false;
 				}
 				result = m_runtime.user_data[reg - m_program.user_data_base];
+				input  = RecordInput(RuntimeInputTrace::Kind::UserData,
+				                     reg - m_program.user_data_base, static_cast<uint32_t>(result));
 				return true;
 			}
 			case ValueOpcode::GetShaderBase: result = m_runtime.shader_base; return true;
-			case ValueOpcode::Phi: return EvaluatePhi(inst, result);
+			case ValueOpcode::Phi: return EvaluatePhi(inst, result, input);
 			case ValueOpcode::ReadFirstLane: {
 				const auto clean_runtime = CleanRuntime(m_runtime);
-				Evaluator  clean_active(m_program, clean_runtime, {}, nullptr, inst.Arg(1));
+				Evaluator  clean_active(m_program, clean_runtime, {}, nullptr, inst.Arg(1), m_trace,
+				                        true);
 				Evaluator  active(m_program, m_runtime, m_clean_flat_slots, &clean_active,
-				                  inst.Arg(1));
+				                  inst.Arg(1), m_trace, m_clean);
 				return active.EvaluateWide(inst.Arg(0), result);
 			}
 			case ValueOpcode::BitCastU32F32:
-			case ValueOpcode::BitCastF32U32: return Arg(inst, 0, result);
+			case ValueOpcode::BitCastF32U32:
+				return EvaluateWide(inst.Arg(0), result, Use::Forward, &input);
 			case ValueOpcode::CompositeExtractU64:
 			case ValueOpcode::CompositeExtractU32x2: return EvaluateExtract(inst, result);
 			case ValueOpcode::CompositeConstructU64:
@@ -731,14 +812,15 @@ private:
 				if (slot.U32() < m_clean_flat_slots.size() &&
 				    m_clean_flat_slots[slot.U32()] != 0u && m_clean_evaluator != nullptr) {
 					return m_clean_evaluator->EvaluateWide(m_program.srt_reads[slot.U32()].value,
-					                                       result);
+					                                       result, Use::Forward, &input);
 				}
-				return EvaluateWide(m_program.srt_reads[slot.U32()].value, result);
+				return EvaluateWide(m_program.srt_reads[slot.U32()].value, result, Use::Forward,
+				                    &input);
 			}
 			case ValueOpcode::LoadAddressU32:
 			case ValueOpcode::ReadConstBuffer:
 				if (IsRawRead(m_program, inst)) {
-					return EvaluateRawRead(inst, result);
+					return EvaluateRawRead(inst, result, input);
 				}
 				break;
 			case ValueOpcode::IAdd32:
@@ -956,7 +1038,7 @@ private:
 			case ValueOpcode::SelectF32: {
 				auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
 				if (predicate.EvaluateWide(inst.Arg(0), a)) {
-					return Arg(inst, a != 0u ? 1u : 2u, result);
+					return EvaluateWide(inst.Arg(a != 0u ? 1u : 2u), result, Use::Forward, &input);
 				}
 				return false;
 			}
@@ -1022,6 +1104,8 @@ private:
 	const SrtRuntime&                         m_runtime;
 	std::span<const uint8_t>                  m_clean_flat_slots;
 	Evaluator*                                m_clean_evaluator = nullptr;
+	RuntimeInputTrace*                        m_trace           = nullptr;
+	bool                                      m_clean           = false;
 	Value                                     m_active_mask;
 	std::unordered_map<const Inst*, uint64_t> m_cache;
 	std::unique_ptr<EvaluatorScratch>         m_scratch;
@@ -1036,11 +1120,14 @@ const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
 	return &program.descriptor_sources[source];
 }
 
+using OutputLinks = std::vector<std::pair<uint32_t, int32_t>>;
+
 bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uint32_t> sources,
                                 const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
                                 std::vector<uint32_t>& flat, bool evaluate_flat,
                                 std::span<const uint8_t> clean_flat_slots,
-                                std::vector<uint8_t>&    active_sources) {
+                                std::vector<uint8_t>&    active_sources,
+                                RuntimeInputTrace* trace = nullptr, OutputLinks* links = nullptr) {
 	if (!program.srt_plan_complete) {
 		return false;
 	}
@@ -1048,9 +1135,20 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 	    runtime.read_specialization_memory == nullptr) {
 		return false;
 	}
-	const auto           clean_runtime = CleanRuntime(runtime);
-	Evaluator            clean_evaluator(program, clean_runtime);
-	Evaluator            evaluator(program, runtime, clean_flat_slots, &clean_evaluator);
+	const auto clean_runtime = CleanRuntime(runtime);
+	Evaluator  clean_evaluator(program, clean_runtime, {}, nullptr, {}, trace, true);
+	Evaluator  evaluator(program, runtime, clean_flat_slots, &clean_evaluator, {}, trace, false);
+	const auto evaluate_output = [&](Evaluator& selected, Value value, uint32_t& result,
+	                                 uint32_t position) {
+		int32_t input = -1;
+		if (!selected.EvaluateOutput(value, result, input)) {
+			return false;
+		}
+		if (links != nullptr && input >= 0) {
+			links->emplace_back(position, input);
+		}
+		return true;
+	};
 	std::vector<uint8_t> active;
 	if (evaluate_flat) {
 		active.assign(program.descriptor_sources.size(), 1u);
@@ -1094,8 +1192,10 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 		DescriptorValue value;
 		value.dword_count = source->dword_count;
 		if (!evaluate_flat || active[source_index]) {
+			const auto base = static_cast<uint32_t>(evaluated.size()) * 8u;
 			for (uint32_t index = 0; index < source->dword_count; index++) {
-				if (!evaluator.Evaluate(source->dwords[index], value.dwords[index])) {
+				if (!evaluate_output(evaluator, source->dwords[index], value.dwords[index],
+				                     base + index)) {
 					return false;
 				}
 			}
@@ -1110,7 +1210,8 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 			                      clean_flat_slots[read.flat_offset] != 0u;
 			auto&      selected = clean ? clean_evaluator : evaluator;
 			if (read.flat_offset >= flattened.size() ||
-			    !selected.Evaluate(read.value, flattened[read.flat_offset])) {
+			    !evaluate_output(selected, read.value, flattened[read.flat_offset],
+			                     RuntimeSourcesMemo::FlatPosition | read.flat_offset)) {
 				return false;
 			}
 		}
@@ -1171,12 +1272,130 @@ bool EvaluateDescriptorSources(const ResourcePlan& program, std::span<const uint
 	                                  active);
 }
 
+namespace {
+
+RuntimeSourcesMemoStats g_memo_stats;
+
+bool ReadRuntimeWord(const SrtRuntime& runtime, const SrtRuntime& clean_runtime,
+                     RuntimeInputTrace::Kind kind, uint64_t address, uint32_t& value) {
+	if (kind == RuntimeInputTrace::Kind::CleanMemory) {
+		return clean_runtime.read_memory(clean_runtime.userdata, address, &value);
+	}
+	if (runtime.read_memory != nullptr) {
+		return runtime.read_memory(runtime.userdata, address, &value);
+	}
+	std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+	return true;
+}
+
+bool ReuseRuntimeSources(const RuntimeSourcesMemo::Entry& entry, const SrtRuntime& runtime,
+                         const SrtRuntime& clean_runtime, std::vector<DescriptorValue>& results,
+                         std::vector<uint32_t>& flat, std::vector<uint8_t>& active_sources) {
+	if (entry.shader_base != runtime.shader_base) {
+		return false;
+	}
+	// Inputs are replayed in evaluation order: an address is only computed from, and read after,
+	// the inputs it depends on. Structural inputs must still hold their recorded value.
+	thread_local std::vector<uint32_t> current;
+	current.resize(entry.inputs.size());
+	for (size_t index = 0; index < entry.inputs.size(); index++) {
+		const auto& input = entry.inputs[index];
+		uint32_t    value = 0;
+		if (input.kind == RuntimeInputTrace::Kind::UserData) {
+			if (input.location >= runtime.user_data.size()) {
+				return false;
+			}
+			value = runtime.user_data[static_cast<size_t>(input.location)];
+		} else {
+			std::array<uint64_t, 4> operands {};
+			for (size_t operand = 0; operand < operands.size(); operand++) {
+				const auto& source = input.operands[operand];
+				operands[operand] =
+				    source.input >= 0 ? current[static_cast<size_t>(source.input)] : source.value;
+			}
+			uint64_t address = 0;
+			if (!ComputeRawReadAddress(input.buffer, operands[0], operands[1], operands[2],
+			                           operands[3], input.immediate, address) ||
+			    !ReadRuntimeWord(runtime, clean_runtime, input.kind, address, value)) {
+				return false;
+			}
+		}
+		if (input.structural && value != input.value) {
+			return false;
+		}
+		current[index] = value;
+	}
+	auto next_results = entry.results;
+	auto next_flat    = entry.flat;
+	for (const auto& leaf: entry.leaves) {
+		const auto value = current[leaf.input];
+		if ((leaf.position & RuntimeSourcesMemo::FlatPosition) != 0u) {
+			next_flat[leaf.position & ~RuntimeSourcesMemo::FlatPosition] = value;
+		} else {
+			next_results[leaf.position / 8u].dwords[leaf.position % 8u] = value;
+		}
+	}
+	results        = std::move(next_results);
+	flat           = std::move(next_flat);
+	active_sources = entry.active;
+	return true;
+}
+
+} // namespace
+
+RuntimeSourcesMemoStats TakeRuntimeSourcesMemoStats() {
+	const auto stats = g_memo_stats;
+	g_memo_stats     = {};
+	return stats;
+}
+
 bool EvaluateRuntimeSources(const ResourcePlan& program, std::span<const uint32_t> sources,
                             const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
                             std::vector<uint32_t>& flat, std::span<const uint8_t> clean_flat_slots,
-                            std::vector<uint8_t>& active_sources) {
-	return EvaluateRuntimeSourcesImpl(program, sources, runtime, results, flat, true,
-	                                  clean_flat_slots, active_sources);
+                            std::vector<uint8_t>& active_sources, RuntimeSourcesMemo* memo) {
+	if (memo == nullptr) {
+		return EvaluateRuntimeSourcesImpl(program, sources, runtime, results, flat, true,
+		                                  clean_flat_slots, active_sources);
+	}
+	const auto clean_runtime = CleanRuntime(runtime);
+	for (const auto& entry: memo->entries) {
+		if (ReuseRuntimeSources(entry, runtime, clean_runtime, results, flat, active_sources)) {
+			g_memo_stats.hits++;
+			return true;
+		}
+	}
+	RuntimeInputTrace trace;
+	OutputLinks       links;
+	if (!EvaluateRuntimeSourcesImpl(program, sources, runtime, results, flat, true,
+	                                clean_flat_slots, active_sources, &trace, &links)) {
+		return false;
+	}
+	if (!trace.cacheable) {
+		g_memo_stats.uncacheable++;
+		return true;
+	}
+	g_memo_stats.misses++;
+	RuntimeSourcesMemo::Entry entry;
+	entry.shader_base = runtime.shader_base;
+	for (const auto& [position, input]: links) {
+		if (!trace.inputs[static_cast<size_t>(input)].structural) {
+			entry.leaves.push_back({static_cast<uint32_t>(input), position});
+		}
+	}
+	g_memo_stats.structural += static_cast<uint64_t>(
+	    std::ranges::count_if(trace.inputs, [](const auto& input) { return input.structural; }));
+	g_memo_stats.leaves += entry.leaves.size();
+	entry.inputs  = std::move(trace.inputs);
+	entry.results = results;
+	entry.flat    = flat;
+	entry.active  = active_sources;
+	if (memo->entries.size() < RuntimeSourcesMemo::MaxEntries) {
+		memo->entries.push_back(std::move(entry));
+	} else {
+		memo->entries[memo->next] = std::move(entry);
+		memo->next                = (memo->next + 1u) % RuntimeSourcesMemo::MaxEntries;
+	}
+	return true;
 }
 
 bool WalkSrt(const ResourcePlan& program, const SrtRuntime& runtime, std::vector<uint32_t>& flat) {
