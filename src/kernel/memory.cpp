@@ -878,6 +878,11 @@ bool TryReadGpuCleanBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return TryReadBacking(vaddr, data, size);
 }
 
+bool IsGpuModifiedRange(uint64_t vaddr, uint64_t size) {
+	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
+	       GetGpuResources().GetBufferCache().IsRegionGpuModified(vaddr, size);
+}
+
 uint64_t MappedRangeSize(uint64_t vaddr, uint64_t size) {
 	return g_virtual_ranges != nullptr ? g_virtual_ranges->ClampRangeSize(vaddr, size) : 0;
 }

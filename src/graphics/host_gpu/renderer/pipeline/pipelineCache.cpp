@@ -120,9 +120,120 @@ void ReportMaterializeMemoStats() {
 	     stats.leaves / misses);
 }
 
+// A checked guest read costs two locks and several range lookups. One materialization reads
+// dozens of words from a few constant blocks, so checked reads are served from small blocks
+// that are fetched once. The blocks only live for one materialization: nothing can turn a
+// range GPU-dirty in between.
+class CleanReadBlocks {
+public:
+	class Scope {
+	public:
+		Scope() noexcept { Instance().Begin(); }
+		~Scope() { Instance().m_active = false; }
+		Scope(const Scope&)            = delete;
+		Scope& operator=(const Scope&) = delete;
+	};
+
+	static CleanReadBlocks& Instance() noexcept {
+		thread_local CleanReadBlocks blocks;
+		return blocks;
+	}
+
+	[[nodiscard]] static bool Enabled() noexcept {
+		static const bool enabled = std::getenv("KYTY_NO_CLEAN_READ_BLOCKS") == nullptr;
+		return enabled;
+	}
+
+	// Unchecked read. Pages without GPU-written data are read in place; only a page that would
+	// fault goes through the backing store.
+	void ReadRaw(uint64_t address, uint32_t* value) noexcept {
+		constexpr uint64_t PageSize = 4096;
+		const auto         page     = address & ~(PageSize - 1u);
+		if (m_active && address - page <= PageSize - sizeof(*value)) {
+			if (!m_page_valid || m_page != page) {
+				m_page       = page;
+				m_page_valid = true;
+				m_page_gpu   = Libs::LibKernel::Memory::IsGpuModifiedRange(page, PageSize);
+			}
+			if (m_page_gpu &&
+			    (Read(address, value) ||
+			     Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value)))) {
+				return;
+			}
+		}
+		std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+	}
+
+	// False: the caller has to fall back to the checked single-word read.
+	bool Read(uint64_t address, uint32_t* value) noexcept {
+		const auto base = address & ~(BlockSize - 1u);
+		if (!m_active || address - base > BlockSize - sizeof(*value)) {
+			return false;
+		}
+		Block* block = nullptr;
+		for (auto& candidate: m_blocks) {
+			if (candidate.valid && candidate.base == base) {
+				block = &candidate;
+				break;
+			}
+		}
+		if (block == nullptr) {
+			block        = &m_blocks[m_next];
+			m_next       = (m_next + 1u) % m_blocks.size();
+			block->base  = base;
+			block->valid = true;
+			block->clean = Libs::LibKernel::Memory::TryReadGpuCleanBacking(base, block->data.data(),
+			                                                               BlockSize);
+		}
+		if (!block->clean) {
+			return false;
+		}
+		std::memcpy(value, block->data.data() + (address - base), sizeof(*value));
+		return true;
+	}
+
+private:
+	static constexpr uint64_t BlockSize = 1024;
+
+	struct Block {
+		uint64_t                       base  = 0;
+		bool                           valid = false;
+		bool                           clean = false;
+		std::array<uint8_t, BlockSize> data {};
+	};
+
+	void Begin() noexcept {
+		m_active     = Enabled();
+		m_next       = 0;
+		m_page_valid = false;
+		for (auto& block: m_blocks) {
+			block.valid = false;
+		}
+	}
+
+	std::array<Block, 16> m_blocks {};
+	size_t                m_next       = 0;
+	uint64_t              m_page       = 0;
+	bool                  m_page_valid = false;
+	bool                  m_page_gpu   = false;
+	bool                  m_active     = false;
+};
+
 bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
-	return value != nullptr &&
+	if (value == nullptr) {
+		return false;
+	}
+	return CleanReadBlocks::Instance().Read(address, value) ||
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
+}
+
+// Unchecked descriptor and constant reads. Guest pages that also hold GPU-written data are
+// protected, and touching them costs a page fault plus a GPU download (~0.5 ms) although the
+// words wanted here were written by the CPU. Words that are not GPU-dirty themselves are read
+// from the backing store, which never faults; only truly GPU-written words take the fault.
+bool ReadShaderRawMemory(void*, uint64_t address, uint32_t* value) {
+	CleanReadBlocks::Instance().ReadRaw(address, value);
+	return true;
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
@@ -313,14 +424,16 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		const ShaderRecompiler::IR::SrtRuntime       runtime {
-		    .user_data                  = params.user_data,
-		    .shader_base                = params.Base(),
+		    .user_data   = params.user_data,
+		    .shader_base = params.Base(),
+		    .read_memory = CleanReadBlocks::Enabled() ? ReadShaderRawMemory : nullptr,
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
 			{
 				KYTY_PROFILER_BLOCK("Shader::MaterializeResources");
 				ReportMaterializeMemoStats();
+				const CleanReadBlocks::Scope clean_read_scope;
 				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 				    entry->second.resource_plan, runtime, resources, specialization,
 				    MaterializeMemoEnabled() ? &entry->second.sources_memo : nullptr));
