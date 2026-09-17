@@ -259,6 +259,7 @@ bool TextureCache::SafeToDownload(const Image& image) {
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
+	m_mutation_epoch.fetch_add(1, std::memory_order_relaxed);
 	if (!info.data.Empty()) {
 		RegisterImage(id);
 	}
@@ -311,6 +312,7 @@ void TextureCache::DeleteImage(ImageId id) {
 	if (image == nullptr || !image->registered) {
 		return;
 	}
+	m_mutation_epoch.fetch_add(1, std::memory_order_relaxed);
 	if (!image->depth_id) {
 		std::vector<ImageId> associations;
 		m_slot_images.ForEach([&](ImageId candidate, const Image& associated) {

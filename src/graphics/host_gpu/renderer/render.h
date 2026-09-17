@@ -120,6 +120,10 @@ public:
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
 	[[nodiscard]] HW::UserConfig&   GetUserConfig() const noexcept { return *m_user_config; }
 	[[nodiscard]] HW::Shader&       GetShaders() const noexcept { return *m_shaders; }
+	// True while a render pass with exactly this state is open in the command buffer.
+	[[nodiscard]] bool IsRenderingWith(const RenderState& state) const {
+		return m_rendering && m_render_state == state;
+	}
 
 private:
 	explicit CommandBuffer(CommandScheduler& scheduler);

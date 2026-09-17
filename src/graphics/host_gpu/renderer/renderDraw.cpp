@@ -1070,6 +1070,17 @@ struct DrawStateCache {
 	uint64_t             epoch        = 0; // 0: nothing cached
 	const CommandBuffer* buffer       = nullptr;
 	uint32_t             slice_offset = 0;
+	// The draw in progress took its state from the previous draw.
+	bool reused = false;
+	// Set after a complete draw whose pipeline, descriptor sets, vertex buffers and dynamic
+	// state are still bound: a following draw with the same state only emits its primitives.
+	bool                  repeat_valid         = false;
+	uint64_t              repeat_tick          = 0;
+	uint64_t              repeat_buffer_epoch  = 0;
+	uint64_t              repeat_texture_epoch = 0;
+	RenderState           repeat_rendering {};
+	vk::PrimitiveTopology repeat_topology = vk::PrimitiveTopology::ePointList;
+	bool                  repeat_restart  = false;
 };
 
 static bool DrawStateReuseEnabled() noexcept {
@@ -1105,11 +1116,14 @@ DrawRenderState* RenderExecutor::AcquireDrawRenderState(CommandBuffer&      buff
 			if (state.depth_info.image_id) {
 				BindRenderTarget(state.depth_info.image_id);
 			}
+			cache.reused = true;
 			return &state;
 		}
 	}
-	cache.epoch = 0;
-	cache.state = {};
+	cache.epoch        = 0;
+	cache.reused       = false;
+	cache.repeat_valid = false;
+	cache.state        = {};
 	if (!PrepareDrawRenderState(buffer, draw, render_target_slice_offset, cache.state)) {
 		return nullptr;
 	}
@@ -1156,6 +1170,37 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
 			     draw.instance_count);
 		}
+	}
+
+	auto* const repeat_cache = m_draw_state_cache && &m_draw_state_cache->state == &state
+	                               ? m_draw_state_cache.get()
+	                               : nullptr;
+	if (repeat_cache != nullptr && repeat_cache->reused && repeat_cache->repeat_valid &&
+	    !mesh_active && repeat_cache->repeat_topology == topology &&
+	    repeat_cache->repeat_restart == primitive_restart_enable &&
+	    DrawStats::FastPaths().load(std::memory_order_relaxed)) {
+		auto&      scheduler = m_context.GetCommandScheduler();
+		const auto unchanged = [&] {
+			return repeat_cache->repeat_tick == scheduler.CurrentTick() &&
+			       repeat_cache->repeat_buffer_epoch ==
+			           m_context.GetBufferCache().RegistrationEpoch() &&
+			       repeat_cache->repeat_texture_epoch ==
+			           m_context.GetTextureCache().MutationEpoch();
+		};
+		if (unchanged()) {
+			// Obtaining the index buffer may upload, create buffers or even submit.
+			const auto repeat_index = PrepareIndexBuffer(buffer, index_source);
+			if (unchanged() && buffer.IsRenderingWith(repeat_cache->repeat_rendering)) {
+				KYTY_PROFILER_BLOCK("Draw::Repeat");
+				const auto repeat_buffer = buffer.Handle();
+				CommitIndexBuffer(repeat_buffer, repeat_index);
+				EmitDrawPrimitives(ucfg, repeat_buffer, state.vertex_info[0], draw, emit);
+				return;
+			}
+		}
+	}
+	if (repeat_cache != nullptr) {
+		repeat_cache->repeat_valid = false;
 	}
 
 	if (mesh_active && draw.IsIndexed()) {
@@ -1339,6 +1384,14 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (shader_write_stages) {
 		m_context.GetCommandScheduler().EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
+	} else if (repeat_cache != nullptr && !mesh_active && DrawStateReuseEnabled()) {
+		repeat_cache->repeat_valid         = true;
+		repeat_cache->repeat_tick          = m_context.GetCommandScheduler().CurrentTick();
+		repeat_cache->repeat_buffer_epoch  = m_context.GetBufferCache().RegistrationEpoch();
+		repeat_cache->repeat_texture_epoch = m_context.GetTextureCache().MutationEpoch();
+		repeat_cache->repeat_rendering     = rendering;
+		repeat_cache->repeat_topology      = topology;
+		repeat_cache->repeat_restart       = primitive_restart_enable;
 	}
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {
