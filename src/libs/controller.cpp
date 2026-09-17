@@ -280,7 +280,10 @@ void GameController::Disconnect(int id) {
 	Common::LockGuard lock(m_mutex);
 
 	const auto it = std::find(m_connected_ids.begin(), m_connected_ids.end(), id);
-	EXIT_IF(it == m_connected_ids.end());
+	if (it == m_connected_ids.end()) {
+		// The host can report the removal of a device that never produced a connect event.
+		return;
+	}
 
 	m_connected_ids.erase(it);
 
@@ -424,7 +427,7 @@ void GameController::ReleaseHostPads() {
 		    pad != nullptr) {
 			if (SDL_GameControllerGetType(pad) == SDL_CONTROLLER_TYPE_PS5) {
 				DualSenseEffects effect {};
-				effect.enable_bits     = 0x0c;
+				effect.enable_bits      = 0x0c;
 				effect.right_trigger[0] = 0x05;
 				effect.left_trigger[0]  = 0x05;
 				(void)SDL_GameControllerSendEffect(pad, &effect, sizeof(effect));
