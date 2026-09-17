@@ -392,6 +392,17 @@ Optimierungen bringen zusammen ~+80 %.
 Streifenmuster zu sehen. Tritt auch mit allen drei Optimierungen abgeschaltet auf (Lauf 60) → kein Cache-Artefakt,
 sondern eigenes Rendering-Thema (Verdacht: TAA-Jitter/History oder Schatten-Filter; offen, Problem 13).
 
+**Spielstand funktioniert (`7f3fb3e`, Läufe 61–67):** „Speichern und beenden“ hing auf schwarzem Bild. Diagnose
+mit neuem HLE-Call-Trace (**F2** im Fenster schaltet die Namensausgabe aller Systemaufrufe um,
+`KYTY_TRACE_BOOT_SECONDS=<n>` traced die ersten n Sekunden; `9f780f2` – Vorsicht, F2 erzeugt ~0,5 GB Log pro
+Minute): Endlosschleife `SaveDataDialogInitialize → Open → UpdateStatus → GetResult` mit System-Message-Typ 4
+(**NOSPACE**, `value` = 96 benötigte Blöcke), *ohne* dass je ein Mount mit CREATE versucht wurde. Ursache:
+`SaveDataGetMountInfo`/`SaveDataDirNameSearch` meldeten pauschal 16 384 Blöcke pro Spielstand; das Spiel budgetiert
+damit und hielt nach dem Laden des 48-Block-Options-Profils sein Kontingent für erschöpft. → Blockzahl beim Anlegen
+im Ordner merken (`sce_kyty_blocks`), echte belegte/freie Blöcke melden, SaveData-Aufrufe immer loggen. Ergebnis:
+`SAVEDATA0PlayerProfile0/USR-DATA` (13 KB) wird geschrieben, **das Hauptmenü bietet „Fortsetzen“ an** – Testläufe
+müssen nicht mehr durch Charakter-Editor und Cutscenes.
+
 **Weitere Fixes dieser Runde** (`a5b52e8`): Upload-Quelle mit entmapptem Ende (Absturz in `memcpy`, Lauf 50) → nur
 den gemappten Teil kopieren; 561-MiB-Image-Upload aus unplausiblem Deskriptor (Lauf 52) → Upload überspringen.
 
