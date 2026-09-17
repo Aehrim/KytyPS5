@@ -4,6 +4,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/sampler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
@@ -471,7 +472,8 @@ void GuestGpu::ThreadRun(void* data) {
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
 	g_gpu_thread = true;
-	g_gpu_state  = gpu;
+	Common::Sampler::RegisterCurrentThread();
+	g_gpu_state = gpu;
 
 	for (;;) {
 		Submission                   submission;

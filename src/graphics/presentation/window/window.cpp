@@ -24,6 +24,7 @@
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/sampler.h"
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "common/timer.h"
@@ -252,6 +253,11 @@ static void GameEventKeyboard(WindowLoopState& game, const EventKeyboard& key) {
 					const bool enabled = !fast.load();
 					fast.store(enabled);
 					LOGF("Renderer fast paths %s\n", enabled ? "enabled" : "disabled");
+				}
+				break;
+			case SDLK_F4:
+				if (!key.repeat) {
+					Common::Sampler::Toggle();
 				}
 				break;
 			case SDLK_F11:
