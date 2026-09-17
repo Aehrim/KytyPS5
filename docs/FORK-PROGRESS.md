@@ -427,6 +427,78 @@ das Spiel schickt pro Bild schlicht mehr Arbeit, und der eine CP-Thread ist die 
 Arbeit pro Bild lesen. Das Speichern selbst (Prepare/SetParam/Commit) kam erst ~100 s nach dem Beenden im Hauptmenü
 an – der Speicher-Job des Spiels läuft asynchron und bei 4 fps entsprechend zäh.
 
+**Schnellpfad pro Draw, Etappe 1 (`9aecda2`, Läufe 68–70).** Erst messen, dann bauen: `KYTY_DRAW_STATS=1` vergleicht
+für jeden Draw Fingerabdrücke seiner Teile mit dem Vorgänger. Im Tunnel:
+
+| Teil des Draws | gleich wie beim vorherigen Draw |
+|---|---|
+| Render-Targets | 99 % |
+| Pipeline / Shader-Programme | 80 % |
+| keine Kontext-Register-Schreibzugriffe dazwischen | 76 % |
+| Deskriptoren + Shader-Konstanten komplett gleich (= keine SH-Register-Schreibzugriffe) | 53 % |
+| Indexbuffer | 24 % |
+
+Gut die Hälfte der Draws unterscheidet sich vom Vorgänger nur im Draw-Paket selbst. Umsetzung: Der Command-Processor
+zählt eine **GPU-State-Epoche** (`gpuStateEpoch.h`) bei jedem PM4-Paket hoch, das Zustand ändern *kann* – alles außer
+Draws, `INDEX_BASE/SIZE/TYPE`, `NUM_INSTANCES`, `SET_BASE` und Marker-NOPs –, außerdem bei jedem GPU-Thread-Kommando
+und jedem neuen PM4-Lauf. Sieht ein Draw dieselbe Epoche (und denselben Command-Buffer, denselben Slice-Offset) wie
+sein Vorgänger, übernimmt er dessen `DrawRenderState` (Shader-Auflösung, materialisierte Deskriptoren, Target-
+Beschreibungen) und setzt nur die Target-Bindungsmarken neu; tote Image-IDs fallen auf den vollen Weg zurück.
+Abschalter `KYTY_NO_DRAW_STATE_REUSE=1`. Trefferquote 52,6 % (Maximum laut Statistik 53 %).
+
+Messmethode, die sich bewährt hat: **A/B im selben Lauf.** `KYTY_DRAW_STATS=ab` schaltet die Schnellpfade mit jedem
+5-s-Report um und misst die mittlere Draw-Zeit je Phase; **F3** schaltet sie von Hand um (Bildvergleich). Zwei getrennte
+Läufe sind nicht vergleichbar – Lauf 69 hatte nach „Fortsetzen“ nur halb so viele Draws pro Bild wie die Messung davor.
+Ergebnis Lauf 70 (8 gegen 7 Phasen): **18,4 → 13,9 µs pro Draw**, +14 % Draw-Durchsatz.
+
+**Seitenfehler in der Deskriptor-Auflösung (`e5ca4d3`, Läufe 71–78).** Frage: warum kostet ein Memo-Treffer bei
+Compute-Shadern ~9 µs, bei Vertex-Shadern ~3,5 µs? Drei Hypothesen, zwei davon falsch – jeweils mit temporären
+Stoppuhren geprüft:
+1. *Viele Memo-Einträge werden durchprobiert* – stimmt für VS/PS (14 Versuche pro Treffer), kostet aber nichts:
+   „letzter Treffer zuerst“ halbierte die Versuche, die Zeit blieb gleich (Fehlversuche scheitern früh). Verworfen.
+2. *Cache-Misses, weil das Spiel die Konstanten auf einem anderen Kern schreibt* – Prefetch 12 Eingaben voraus
+   brachte nichts. Verworfen.
+3. *Seltene, extrem teure Lesezugriffe* – `rdtsc` um jeden Zugriff: normale Zugriffe kosten wenige Nanosekunden, aber
+   ~2 % der Compute-Auflösungen enthalten einen Zugriff von **~0,45 ms** (94 % der gesamten Lesezeit; VS 83 %, PS 75 %
+   mit kleineren Ausreißern). Das sind Seitenfehler: Der Emulator sperrt Seiten mit GPU-geschriebenen Daten **als
+   ganze 4-KiB-Seite**; liegen CPU-geschriebene Shader-Konstanten in derselben Seite, löst schon ihr Lesen Fault +
+   GPU-Download aus. Hochgerechnet ~1000 Faults/s ≈ 15 % der Command-Processor-Zeit, plus erzwungene GPU-Syncs.
+
+Fix: Rohe Lesezugriffe der Materialisierung laufen über `SrtRuntime::read_memory`. Pro Seite wird einmal der
+Buffer-Tracker gefragt (`Memory::IsGpuModifiedRange`, reine Bit-Abfrage); normale Seiten werden wie bisher direkt
+gelesen, GPU-modifizierte über den Backing-Store (zweiter, ungeschützter Blick auf denselben Speicher) – erst als
+1-KiB-Block, bei teilweise GPU-geschriebenem Block als Einzelwort, und nur wirklich GPU-geschriebene Worte nehmen noch
+den Fault. Die Blöcke leben nur für eine Auflösung. Abschalter `KYTY_NO_CLEAN_READ_BLOCKS=1`.
+
+| Materialisierung pro Aufruf | vorher (Lauf 71) | nachher (Lauf 78) |
+|---|---|---|
+| Compute | 9,3–10,6 µs | **4,1 µs** |
+| Vertex | 4,2–4,9 µs | 4,0 µs |
+| Pixel | 1,9–2,4 µs | 2,7 µs (Streuung; PS-Ausreißer unverändert) |
+
+Offen: Die verbleibenden Ausreißer (PS ~20 µs, VS ~8 µs) dürften Seiten sein, die der *Texture*-Tracker sperrt – die
+Vorprüfung fragt bisher nur den Buffer-Tracker. Lehre: Mittelwerte verstecken Ausreißer; ein Zyklenzähler mit
+Schwellwert („wie viele Zugriffe > 1 µs, welcher Zeitanteil“) hat in einem Lauf geklärt, was zwei Hypothesen nicht
+konnten.
+
+**Gesamtmessung nach beiden Schritten (Lauf 79, Tunnel, 25 s Tracy, ohne Hintergrundlast, gleiche Szene wie Lauf 59):**
+
+| | Lauf 59 | Lauf 79 |
+|---|---|---|
+| Presents in 25 s | 95–97 (**3,8 fps**) | 127 (**5,1 fps**) |
+| verarbeitete Draws / Dispatches | 591k / 261k | 788k / 350k |
+| `DrawIndex` | 20,0 µs | **14,9 µs** |
+| `DispatchDirect` | 26,1 µs | **16,8 µs** |
+| `Dispatch::GetComputeProgram` | 11,3 µs | 3,6 µs |
+| `CpOpDispatchIndirect` | 70 µs | 56 µs |
+| `DrawAuto` | 122 µs | 48 µs |
+
++34 % Befehlsdurchsatz, fps im selben Verhältnis – der Command-Processor-Thread ist weiter zu ~90 % ausgelastet und
+bleibt die Obergrenze. Nächste Kandidaten laut Profil: `Dispatch::BindAndEmit` (12,8 µs × 342k = 4,4 s von 25 s),
+`ExecutePreparedDraw` (9,9 µs × 800k = 8,0 s: `PrepareBindings`, `PrepareGraphicsBindings`, `CommitAndEmit` – Etappe 2
+des Schnellpfads: vorbereitete Bindings bei gleicher Epoche wiederverwenden, Descriptor-Set nicht neu schreiben),
+`PrepareDrawRenderState` bei Epochenwechsel (9,9 µs × 381k = 3,8 s).
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
