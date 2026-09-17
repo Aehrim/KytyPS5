@@ -40,7 +40,7 @@ Auswertung headless: `qrenderdoc.exe --python <script.py>` mit dem `renderdoc`-M
 | Intro-/Logo-Videos (Bink) | ✅ mit Ton |
 | Hauptmenü | ✅ bedienbar, **kein Ton** |
 | Neues Spiel → Charakter-Editor | ✅ vollständig durchlaufen (Texturen größtenteils schwarz) |
-| Charakter-Editor → Spielwelt | ✅ **Im Spiel**, Kamera und Bewegung funktionieren; HUD korrekt; 3D-Welt-Farben = NaN aus dem Nebelvolumen (RenderDoc-Befund, Fix `90917f7` unverifiziert) |
+| Charakter-Editor → Spielwelt | ✅ **Im Spiel**, Kamera und Bewegung funktionieren; HUD korrekt; Cutscenes rendern korrekt (seit `19536cf`); Spielwelt: weiß → kurz Texturen → schwarz (Problem 12) |
 | Performance | 1–2 fps in der Welt – Shader-Kompilierung, kein Pipeline-Cache, CPU-seitige Tabellen-Materialisierung pro Dispatch; noch nicht aussagekräftig |
 
 ## Meilensteine
@@ -238,6 +238,31 @@ Instruktion finden. Werkzeuge: `rd_overview.py`, `rd_passes.py`, `rd_dump.py` (P
     - RenderDoc-Hinweise: `DebugThread` stürzt bei Compute-Shadern mit Subgroup-Ops ab (Segfault) → Speicherinhalte
       analysieren; Skripte mit `os._exit(0)` beenden (Replay-Shutdown hängt sonst minutenlang).
 
+22. **Formatierte Buffer-Stores kodieren nicht** (`spirvEmitterMemory.cpp` / `spirvEmitterMemoryHelpers.cpp`) –
+    **die eigentliche NaN-Ursache aus Meilenstein 21.** Korrektur der dortigen Annahme: die von den Shadern benutzten
+    Probe-Records stammen *nicht* aus den `.cgpd`-Dateien (nur der ungenutzte Rest des Heaps war Dateiinhalt), sondern
+    werden zur Laufzeit geschrieben (~250 Records pro Frame, GI-Probe-Relighting). `BUFFER_LOAD_FORMAT_*` normalisiert
+    über das Deskriptor-Format (`NormalizeFormatComponent`), `BUFFER_STORE_FORMAT_*` schrieb dagegen die unteren
+    8/16 Bit des Registers unverändert – bei Float-Registern also Mantissen-Rauschen. Daher „gleichverteilte 16-Bit-
+    Werte“ in einem RGBA16F-Buffer. Upstreams Tests decken nur Integer- und 32-Bit-Formate ab (dort ist roh korrekt).
+    → `EncodeFormatComponent` als Umkehrung: UNorm/SNorm klemmen, skalieren, runden (NaN → 0); UScaled/SScaled
+    klemmen und konvertieren; Float16 mit Round-toward-zero (`EmitF32ToF16RtzBits`); Integer, 32 Bit und 10/11-Bit-
+    Float bleiben roh. Tests `BufferStoreFormatXResource16FloatEncodesHalf`, `…8UnormEncodesByte` (gebaut, **noch nicht
+    ausgeführt**: die Test-Binary reserviert 13,8 GB Commit, die beim Testen nicht frei waren). Commit `19536cf`.
+    **Ergebnis Lauf 32:** Cutscene nach dem Charakter-Editor und die In-Game-Cutscene rendern korrekt, die
+    Reinfarben sind weg. In der Welt danach: weißes Bild, kurz Texturen, dann Schwarz (neues offenes Problem 12).
+23. **Controller-Removal ohne Connect** (`controller.cpp`, Lauf 31 nach 36 s): SDL meldete „removed“ für Pads 1 und 2,
+    verbunden war nur Pad 0 → `EXIT_IF`. Jetzt ignoriert. Commit `30d8dad`.
+24. **GPU→CPU-Download > 32 MiB** (`bufferCache.cpp`, Lauf 33 während eines RenderDoc-Captures):
+    `BufferCache: download exceeds 32 MiB staging buffer capacity`. → GPU-modifizierte Bereiche werden in Stücke
+    ≤ 16 MiB zerlegt und batchweise über den Download-Ring geholt; der Command-Buffer wird pro Batch neu geholt, weil
+    das Mappen auf den Ring warten und dabei submitten kann. Lauf 34 kam über die Stelle hinaus (noch nicht committet).
+
+**RenderDoc-Praxis:** Mit `--rd` belegt der Emulator in der Welt 22–24 GB statt ~10 GB; bei 32 GB RAM und weiteren
+offenen Programmen lagert Windows aus und ein 2-Flip-Capture dauert > 20 min. Vor Captures alles schließen;
+ggf. `renderDoc.cpp` auf 1 Flip umstellen. Der clang-format-Hook (v22.1.3) formatiert ganze Dateien anders als
+upstream (z. B. `struct A: B`), was die Diffs aufbläht – vor Upstream-PRs Version angleichen.
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
@@ -254,8 +279,9 @@ ohne Verdrängung; für längere Sessions relevant.
 | 7 | Depth-Feedback-Pässe laufen ohne Layout-Übergang (`541d11f`); Bildqualität dieser Pässe (Nebel, Partikel) unklar | offen |
 | 8 | Indexed-Tables mit unbeschränktem Index nutzen ein festes 32-Einträge-Budget (`2ee0ab1`); Einträge jenseits der echten Tabelle werden genullt, Indizes ≥ 32 fallen auf Kandidat 0 zurück | akzeptiert, beobachten |
 | 9 | ~~Lauf 25 komplett schwarz~~ – A/B-Test (Läufe 27/28): `90917f7` ist unschuldig, Ursache war Problem 5 | erledigt |
-| 10 | **NaN-Ursprung: GI-Probe-Tabelle** (s8 des Nebel-Lichtshaders `0xf0dc79c3467d5e0b`) enthält rohe `.cgpd`-Dateidaten (16-Bit-Integer), wird aber laut Deskriptor als RGBA16F gelesen → Müll/NaN (Meilenstein 21). Nächster Schritt: klären, wer den Buffer füllt (CPU-Pfad, Datei-I/O, AMM-Remap) und ob die Daten zur eboot-Version passen | in Arbeit |
+| 10 | ~~NaN-Ursprung im Nebel~~ – formatierte Buffer-Stores schrieben rohe Float-Bits (Meilenstein 22, `19536cf`) | erledigt, Cutscenes korrekt |
 | 11 | Albedo-Texturen (BC1 2048², Material-Pass 174246) liefern an Mip 0 Nullen – bei gestreamten Texturen evtl. nur Mip 0 nicht resident; auf residentem Mip nachprüfen (`rd_probe.py` mit Mip 3–5). | offen |
+| 12 | **Welt nach dem Laden: weiß → kurz Texturen → schwarz** (Lauf 32, nach dem Store-Fix). Verdacht: Auto-Exposure-/TAA-History oder weitere formatierte Stores/Loads (10/11-Bit-Float, Swizzle beim Store). Neues Capture nötig, NaN-Scan pro Pass (`rd_fog.py`-Prinzip) | offen |
 
 ## Geplante Themen
 
