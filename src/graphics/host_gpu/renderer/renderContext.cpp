@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/profiler.h"
 #include "graphics/guest_gpu/gpuStateEpoch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/regionManager.h"
@@ -65,6 +66,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
 	}
+	KYTY_PROFILER_BLOCK("RenderContext::HandleFault");
 	if (access == PageFaultAccess::Write) {
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);

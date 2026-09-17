@@ -277,6 +277,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     vaddr, size);
 	}
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+		KYTY_PROFILER_BLOCK("BufferCache::ReadMemory");
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
@@ -291,6 +292,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		    std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
 
 		if (DownloadBufferMemory(buffer, window_begin, window_end - window_begin)) {
+			KYTY_PROFILER_BLOCK("BufferCache::ReadMemory::WaitGpu");
 			const auto tick = m_scheduler.CurrentTick();
 			m_scheduler.Wait(tick);
 			m_scheduler.WaitPriorityOperations(tick);

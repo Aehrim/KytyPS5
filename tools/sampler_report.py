@@ -21,18 +21,25 @@ def main():
     addresses = sorted({a for stack in stacks for a in stack})
     inside = [a for a in addresses if base <= a < base + (1 << 31)]
     query = '\n'.join('0x%x' % (a - base + IMAGE_BASE) for a in inside) + '\n'
-    out = subprocess.run([symbolizer, '--obj=' + exe, '--functions=short', '--no-inlines',
-                          '--output-style=LLVM'], input=query, capture_output=True, text=True).stdout
+    out = subprocess.run([symbolizer, '--obj=' + exe, '--no-inlines'], input=query,
+                         capture_output=True, text=True).stdout
     blocks = [b for b in out.split('\n\n') if b.strip()]
     names = {}
     for address, block in zip(inside, blocks):
         name = block.strip().split('\n')[0]
-        names[address] = re.sub(r'\(.*', '', name)[:90]
+        name = re.sub(r'\(.*', '', name)
+        names[address] = re.sub(r'^(Libs::Graphics::|Libs::)', '', name)[:100]
     self_time = collections.Counter()
     inclusive = collections.Counter()
+    outside = '<outside>'
     for stack in stacks:
-        resolved = [names.get(a, '<outside: driver/system>') for a in stack]
-        self_time[resolved[0]] += 1
+        resolved = [names.get(a, outside) for a in stack]
+        leaf = resolved[0]
+        if leaf == outside:
+            # Time in the driver, the C runtime or the kernel: name the function that called out.
+            caller = next((name for name in resolved if name != outside), '?')
+            leaf = '%s  [in driver/system]' % caller
+        self_time[leaf] += 1
         for name in set(resolved):
             inclusive[name] += 1
     total = len(stacks)

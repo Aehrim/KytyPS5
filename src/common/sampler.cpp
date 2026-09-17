@@ -19,8 +19,8 @@ namespace Common::Sampler {
 
 namespace {
 
-constexpr size_t   MaxDepth   = 16;
-constexpr size_t   MaxSamples = 40000;
+constexpr size_t   MaxDepth   = 48;
+constexpr size_t   MaxSamples = 30000;
 constexpr uint32_t Seconds    = 20;
 
 using Sample = std::array<uint64_t, MaxDepth>;
