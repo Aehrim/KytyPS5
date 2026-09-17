@@ -23,6 +23,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <cinttypes>
 #include <list>
 #include <thread>
 #include <vector>
@@ -1161,6 +1164,24 @@ bool FlipQueue::Flip(uint32_t micros) {
 	if (Config::GraphicsDebugDumpEnabled() &&
 	    Config::GetPrintfDirection() != Config::LogDirection::Silent) {
 		LOGF("Flip done: %d\n", r.index);
+	}
+
+	// Presentation heartbeat: one line per second at most, so logs show whether and how fast the
+	// guest presents without the debug dump.
+	{
+		static std::atomic<uint64_t> flip_count {0};
+		static std::atomic<int64_t>  last_report_ms {0};
+		static std::atomic<uint64_t> last_report_flips {0};
+		const auto                   flips = flip_count.fetch_add(1) + 1;
+		const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		                        std::chrono::steady_clock::now().time_since_epoch())
+		                        .count();
+		auto       last   = last_report_ms.load();
+		if (now_ms - last >= 1000 && last_report_ms.compare_exchange_strong(last, now_ms)) {
+			const auto previous = last_report_flips.exchange(flips);
+			LOGF("Present heartbeat: flips=%" PRIu64 " (+%" PRIu64 " in %" PRId64 " ms)\n", flips,
+			     flips - previous, last == 0 ? int64_t {0} : now_ms - last);
+		}
 	}
 
 	return true;

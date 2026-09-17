@@ -5,6 +5,7 @@
 #include "libs/ajm/decoder.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
@@ -303,10 +304,14 @@ private:
 		          static_cast<uint32_t>(m_codec_info.samplingRate), m_sample_encoding);
 		m_pcm_buffer.assign(FrameOutputBytes(), 0);
 
-		LOGF("AJM ATRAC9 initialized: %d Hz, %d ch, frame_samples=%d, superframe=%d bytes/%d "
-		     "frames\n",
-		     m_codec_info.samplingRate, m_codec_info.channels, m_codec_info.frameSamples,
-		     m_codec_info.superframeSize, m_codec_info.framesInSuperframe);
+		// Games re-initialize pooled decoder instances for every voice; keep the log readable.
+		static std::atomic<uint32_t> init_log_count {0};
+		if (init_log_count.fetch_add(1) < 16u) {
+			LOGF("AJM ATRAC9 initialized: %d Hz, %d ch, frame_samples=%d, superframe=%d bytes/%d "
+			     "frames\n",
+			     m_codec_info.samplingRate, m_codec_info.channels, m_codec_info.frameSamples,
+			     m_codec_info.superframeSize, m_codec_info.framesInSuperframe);
+		}
 
 		return true;
 	}
@@ -493,8 +498,11 @@ private:
 					gapless_decode.skip_samples  = static_cast<uint16_t>(std::min<uint32_t>(
 					    AjmReadLe32(input + payload + 4), std::numeric_limits<uint16_t>::max()));
 					gapless->Set(gapless_decode, true);
-					LOGF("AJM ATRAC9 gapless: total=%" PRIu32 ", skip=%" PRIu16 "\n",
-					     gapless_decode.total_samples, gapless_decode.skip_samples);
+					static std::atomic<uint32_t> gapless_log_count {0};
+					if (gapless_log_count.fetch_add(1) < 16u) {
+						LOGF("AJM ATRAC9 gapless: total=%" PRIu32 ", skip=%" PRIu16 "\n",
+						     gapless_decode.total_samples, gapless_decode.skip_samples);
+					}
 				}
 			} else if (AjmFourCcEquals(chunk, 'd', 'a', 't', 'a')) {
 				*data_offset                  = payload;
