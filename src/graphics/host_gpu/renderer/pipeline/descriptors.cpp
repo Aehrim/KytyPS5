@@ -209,6 +209,20 @@ static void ValidateSampledDepthBinding(const ShaderRecompiler::IR::ImageResourc
 	if (resource_ok && encoding_ok && view_ok) {
 		return;
 	}
+	if (resource_ok && view_ok) {
+		// The image and view are usable; only descriptor bits outside the known encoding differ
+		// (Demon's Souls samples its scene depth with DEPTH/BASE_ARRAY set on a 2D descriptor).
+		static std::atomic<uint32_t> encoding_log_count {0};
+		if (encoding_log_count.fetch_add(1) < 8u) {
+			LOGF("sampled depth image with unknown descriptor encoding: type=%u base_array=%u "
+			     "depth=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+			     static_cast<uint32_t>(descriptor.Type()), descriptor.BaseArray5(),
+			     descriptor.Depth(), descriptor.fields[0], descriptor.fields[1],
+			     descriptor.fields[2], descriptor.fields[3], descriptor.fields[4],
+			     descriptor.fields[5], descriptor.fields[6], descriptor.fields[7]);
+		}
+		return;
+	}
 	const auto descriptor_pitch =
 	    TileGetTexturePitch(descriptor.Format(), static_cast<uint32_t>(descriptor.Width5()) + 1u,
 	                        descriptor.TileMode());
