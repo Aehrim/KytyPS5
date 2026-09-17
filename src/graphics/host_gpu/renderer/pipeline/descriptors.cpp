@@ -554,7 +554,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto     type            = TextureType(descriptor);
 	const bool     multisampled    = IsMultisampledTexture(type);
 	const uint32_t max_mip         = resource.r128 ? last_level : descriptor.MaxMip();
-	const auto     physical_levels = multisampled ? 1u : max_mip + 1u;
+	uint32_t       physical_levels = multisampled ? 1u : max_mip + 1u;
 	uint32_t       levels          = multisampled ? 1u : std::max(physical_levels, last_level + 1u);
 	const auto     tile            = descriptor.TileMode();
 	const bool     depth_tile      = tile == Prospero::TileMode::kDepth;
@@ -609,22 +609,31 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		// layout.
 		if (!TextureViewPreservesMipLayout(physical, levels)) {
 			if (base_level > max_mip) {
-				EXIT("unsupported texture mip view changes physical layout: base=%u last=%u max=%u "
-				     "extent=%ux%ux%u tile=%u\n",
-				     base_level, last_level, max_mip, width, height, depth,
-				     static_cast<uint32_t>(tile));
+				// The view starts beyond the resource count, so MAX_MIP cannot describe the
+				// storage: mips are laid out smallest first and the view's own level count locates
+				// them.
+				static std::atomic<uint32_t> view_log_count {0};
+				if (view_log_count.fetch_add(1) < 16u) {
+					LOGF("texture mip view beyond resource count, using view levels: base=%u "
+					     "last=%u "
+					     "max=%u extent=%ux%ux%u tile=%u format=%u addr=0x%016" PRIx64 "\n",
+					     base_level, last_level, max_mip, width, height, depth,
+					     static_cast<uint32_t>(tile), static_cast<uint32_t>(format), address);
+				}
+				physical_levels = levels;
+			} else {
+				// Streamed textures describe their full mip chain while only max_mip + 1 levels are
+				// resident; sampling clamps to the resident levels.
+				static std::atomic<uint32_t> clamp_log_count {0};
+				if (clamp_log_count.fetch_add(1) < 16u) {
+					LOGF("texture mip view clamped to resident levels: base=%u last=%u max=%u "
+					     "extent=%ux%ux%u tile=%u format=%u addr=0x%016" PRIx64 "\n",
+					     base_level, last_level, max_mip, width, height, depth,
+					     static_cast<uint32_t>(tile), static_cast<uint32_t>(format), address);
+				}
+				last_level = max_mip;
+				levels     = physical_levels;
 			}
-			// Streamed textures describe their full mip chain while only max_mip + 1 levels are
-			// resident; sampling clamps to the resident levels.
-			static std::atomic<uint32_t> clamp_log_count {0};
-			if (clamp_log_count.fetch_add(1) < 16u) {
-				LOGF("texture mip view clamped to resident levels: base=%u last=%u max=%u "
-				     "extent=%ux%ux%u tile=%u\n",
-				     base_level, last_level, max_mip, width, height, depth,
-				     static_cast<uint32_t>(tile));
-			}
-			last_level = max_mip;
-			levels     = physical_levels;
 		}
 	}
 	const auto    samples     = multisampled ? 1u << last_level : 1u;
