@@ -1130,9 +1130,19 @@ void TextureCache::InitializeImage(ImageId id) {
 		const auto [source, source_offset] =
 		    m_buffer_cache.ObtainBufferForImage(image.info.data.address, image.info.data.size);
 		if (source == nullptr) {
-			EXIT("TextureCache: failed to obtain image upload source\n");
+			// An image larger than the staging ring comes from an implausible descriptor
+			// (Demon's Souls: 561 MiB); leave it without guest content instead of aborting.
+			static std::atomic<uint32_t> log_count {0};
+			if (log_count.fetch_add(1) < 16u) {
+				LOGF("TextureCache: skipping upload of oversized image: addr=0x%016" PRIx64
+				     " size=0x%" PRIx64 " extent=%ux%ux%u levels=%u layers=%u\n",
+				     image.info.data.address, image.info.data.size, image.info.extent.width,
+				     image.info.extent.height, image.info.extent.depth, image.info.resources.levels,
+				     image.info.resources.layers);
+			}
+		} else {
+			UploadImage(image, *source, source_offset);
 		}
-		UploadImage(image, *source, source_offset);
 		image.ClearBufferModified();
 	}
 	if (image.IsCpuDirty()) {

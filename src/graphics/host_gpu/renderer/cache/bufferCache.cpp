@@ -437,6 +437,25 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	return false;
 }
 
+// Guest memory behind a cached buffer can be unmapped between registration and upload (the
+// guest frees part of a streamed allocation). Copy through the backing lookup and leave pages
+// that are gone zeroed instead of faulting on a raw memcpy.
+static void ReadGuestOrZero(uint64_t address, uint8_t* destination, uint64_t size) {
+	const auto mapped = Libs::LibKernel::Memory::MappedRangeSize(address, size);
+	if (mapped >= size) {
+		std::memcpy(destination, reinterpret_cast<const void*>(address), size);
+		return;
+	}
+	std::memcpy(destination, reinterpret_cast<const void*>(address), mapped);
+	std::memset(destination + mapped, 0, size - mapped);
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1) < 16u) {
+		LOGF("BufferCache: upload source partly unmapped: addr=0x%016" PRIx64 " size=0x%" PRIx64
+		     " mapped=0x%" PRIx64 "\n",
+		     address, size, mapped);
+	}
+}
+
 vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
                                      uint64_t total_size) {
 	if (copies.empty()) {
@@ -447,7 +466,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	if (mapped != nullptr) {
 		for (auto& copy: copies) {
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
-			std::memcpy(mapped + copy.srcOffset, reinterpret_cast<const void*>(address), copy.size);
+			ReadGuestOrZero(address, mapped + copy.srcOffset, copy.size);
 			copy.srcOffset += base_offset;
 		}
 		m_staging_buffer.Commit();
@@ -458,8 +477,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	                                          vk::BufferUsageFlagBits::eTransferSrc, total_size);
 	for (const auto& copy: copies) {
 		const auto address = buffer.CpuAddress() + copy.dstOffset;
-		std::memcpy(temporary->Mapped().data() + copy.srcOffset,
-		            reinterpret_cast<const void*>(address), copy.size);
+		ReadGuestOrZero(address, temporary->Mapped().data() + copy.srcOffset, copy.size);
 	}
 	temporary->Flush(0, total_size);
 	const auto handle = temporary->Handle();
@@ -518,7 +536,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 
 	auto [staging, stage_offset] = m_staging_buffer.Map(size, 16);
 	if (staging == nullptr) {
-		EXIT("BufferCache: image source of 0x%" PRIx64 " bytes exceeds the staging buffer\n", size);
+		// Larger than the staging ring: the caller skips the upload.
+		return {nullptr, 0};
 	}
 	if (!Libs::LibKernel::Memory::TryReadBacking(vaddr, staging, size) &&
 	    !Libs::LibKernel::Memory::TryReadPrtBacking(vaddr, staging, size)) {
