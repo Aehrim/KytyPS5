@@ -7,6 +7,8 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 
 namespace Libs::Graphics {
 
@@ -130,6 +132,15 @@ void RenderContext::RunGarbageCollector() {
 	if (m_fault_process_pending) {
 		m_fault_process_pending = false;
 		m_buffer_cache.ProcessFaultBuffer();
+	}
+	static const bool nan_trace = std::getenv("KYTY_NAN_TRACE") != nullptr;
+	if (nan_trace) {
+		static auto last = std::chrono::steady_clock::now();
+		const auto  now  = std::chrono::steady_clock::now();
+		if (now - last >= std::chrono::seconds(1)) {
+			last = now;
+			m_buffer_cache.ProcessNanTrace();
+		}
 	}
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();

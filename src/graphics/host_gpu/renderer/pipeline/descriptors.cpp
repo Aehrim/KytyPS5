@@ -66,6 +66,7 @@ vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 		case BindingKind::Gds:
 		case BindingKind::BdaPagetable:
 		case BindingKind::FaultBuffer:
+		case BindingKind::NanTrace:
 		case BindingKind::FlattenedSrt:
 		case BindingKind::ShaderData: return vk::DescriptorType::eStorageBuffer;
 		case BindingKind::Count: EXIT("invalid native descriptor binding kind");
@@ -1114,6 +1115,11 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 						                             : cache.GetFaultBuffer();
 						m_descriptor_buffers.emplace_back(bda_buffer->Handle(), 0,
 						                                  bda_buffer->Size());
+						break;
+					}
+					case BindingKind::NanTrace: {
+						const auto* trace = m_context.GetBufferCache().GetNanTraceBuffer();
+						m_descriptor_buffers.emplace_back(trace->Handle(), 0, trace->Size());
 						break;
 					}
 					case BindingKind::FlattenedSrt:

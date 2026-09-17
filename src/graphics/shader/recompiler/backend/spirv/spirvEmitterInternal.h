@@ -92,6 +92,8 @@ struct EmitterState {
 	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> memory_byte_offsets {};
 	uint32_t                                         bda_pagetable_variable       = 0;
 	uint32_t                                         fault_buffer_variable        = 0;
+	uint32_t                                         nan_trace_variable           = 0;
+	uint32_t                                         nan_trace_ordinal            = 0;
 	uint32_t                                         bda_pointer_function         = 0;
 	uint32_t                                         gds_variable                 = 0;
 	uint32_t                                         gds_length                   = 0;

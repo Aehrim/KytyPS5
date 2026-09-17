@@ -11,12 +11,16 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
+#include <fmt/format.h>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -200,6 +204,8 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
       m_gds_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, GdsBufferSize),
+      m_nan_trace_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
+                         2ull * ShaderRecompiler::IR::NanTraceSlots * sizeof(uint32_t)),
       m_bda_pagetable_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                              BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
@@ -209,6 +215,9 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
+	std::memset(m_nan_trace_buffer.Mapped().data(), 0,
+	            static_cast<size_t>(m_nan_trace_buffer.Size()));
+	m_nan_trace_buffer.Flush(0, m_nan_trace_buffer.Size());
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
 	                     "BDA Page Table Buffer");
@@ -508,9 +517,24 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 	}
 
 	auto [staging, stage_offset] = m_staging_buffer.Map(size, 16);
-	if (staging == nullptr || (!Libs::LibKernel::Memory::TryReadBacking(vaddr, staging, size) &&
-	                           !Libs::LibKernel::Memory::TryReadPrtBacking(vaddr, staging, size))) {
-		EXIT("BufferCache: failed to read mapped guest image backing\n");
+	if (staging == nullptr) {
+		EXIT("BufferCache: image source of 0x%" PRIx64 " bytes exceeds the staging buffer\n", size);
+	}
+	if (!Libs::LibKernel::Memory::TryReadBacking(vaddr, staging, size) &&
+	    !Libs::LibKernel::Memory::TryReadPrtBacking(vaddr, staging, size)) {
+		// The descriptor covers more than the guest has mapped (a streamed texture whose tail is
+		// not resident). Upload what exists and leave the rest zeroed.
+		const auto mapped = Libs::LibKernel::Memory::ClampRangeSize(vaddr, size);
+		std::memset(staging, 0, size);
+		const bool partial = mapped != 0 && mapped < size &&
+		                     (Libs::LibKernel::Memory::TryReadBacking(vaddr, staging, mapped) ||
+		                      Libs::LibKernel::Memory::TryReadPrtBacking(vaddr, staging, mapped));
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1) < 16u) {
+			LOGF("BufferCache: image backing only partly mapped: addr=0x%016" PRIx64
+			     " size=0x%" PRIx64 " mapped=0x%" PRIx64 " read=%d\n",
+			     vaddr, size, mapped, partial ? 1 : 0);
+		}
 	}
 	m_staging_buffer.Commit();
 	return {&m_staging_buffer, stage_offset};
@@ -654,6 +678,30 @@ void BufferCache::RunGarbageCollector() {
 		m_memory_tracker.UntrackMemory(buffer.CpuAddress(), buffer.Size());
 		Unregister(id);
 		m_slot_buffers.erase(id);
+	}
+}
+
+// Diagnostics (KYTY_NAN_TRACE): report trace slots the instrumented shader has set since the last
+// call. Slot numbers refer to the "nan-trace legend" lines printed when the shader was emitted.
+void BufferCache::ProcessNanTrace() {
+	constexpr uint32_t   slots = ShaderRecompiler::IR::NanTraceSlots;
+	auto*                words = reinterpret_cast<uint32_t*>(m_nan_trace_buffer.Mapped().data());
+	std::vector<uint8_t> current(2u * slots, 0);
+	std::string          text;
+	for (uint32_t index = 1; index < 2u * slots; index++) {
+		if (index == slots || words[index] == 0) {
+			continue;
+		}
+		current[index]      = 1;
+		words[index]        = 0;
+		const bool infinity = index > slots;
+		text += fmt::format(" {}{}", infinity ? "inf@" : "nan@",
+		                    (infinity ? index - slots : index) - 1u);
+	}
+	// Report the set of origins of the last interval whenever it changes.
+	if (current != m_nan_trace_seen) {
+		m_nan_trace_seen = std::move(current);
+		LOGF("nan-trace:%s\n", text.empty() ? " none" : text.c_str());
 	}
 }
 

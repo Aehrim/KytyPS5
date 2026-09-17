@@ -275,11 +275,17 @@ enum class DescriptorBindingKind : uint32_t {
 	FaultBuffer,
 	FlattenedSrt,
 	ShaderData,
+	NanTrace,
 	Count,
 };
 
 static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 44u);
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 50u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 51u);
+
+// Diagnostics: KYTY_NAN_TRACE=<shader hash> instruments that shader so the first instruction
+// producing a NaN or infinity from finite operands is reported by the host.
+constexpr uint32_t NanTraceSlots = 0x4000u;
+[[nodiscard]] bool IsNanTraced(uint64_t shader_hash);
 
 struct PushData {
 	static constexpr uint32_t        DwordCount         = 32;

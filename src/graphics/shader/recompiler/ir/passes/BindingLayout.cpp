@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -76,11 +77,10 @@ void AllocateBindings(Program& program, uint32_t push_data_start_dword) {
 		                                             : "binding layout already allocated");
 	}
 	BindingLayout next;
-	next.user_data_registers = CollectUserData(program);
-	next.memory_offset_dword = static_cast<uint32_t>(next.user_data_registers.size());
-	next.memory_offset_count = static_cast<uint32_t>(program.info.buffers.size());
-	next.push_data_start_dword =
-	    PushData::StartFor(push_data_start_dword, next.ShaderDataDwords());
+	next.user_data_registers   = CollectUserData(program);
+	next.memory_offset_dword   = static_cast<uint32_t>(next.user_data_registers.size());
+	next.memory_offset_count   = static_cast<uint32_t>(program.info.buffers.size());
+	next.push_data_start_dword = PushData::StartFor(push_data_start_dword, next.ShaderDataDwords());
 
 	if (!program.info.buffers.empty()) {
 		std::vector<uint32_t> resources(program.info.buffers.size());
@@ -130,6 +130,9 @@ void AllocateBindings(Program& program, uint32_t push_data_start_dword) {
 		AddBinding(next, DescriptorBindingKind::BdaPagetable);
 		AddBinding(next, DescriptorBindingKind::FaultBuffer);
 	}
+	if (IsNanTraced(program.shader_hash)) {
+		AddBinding(next, DescriptorBindingKind::NanTrace);
+	}
 	const bool uses_flattened_runtime =
 	    !program.srt_reads.empty() ||
 	    std::ranges::any_of(program.info.images, [](const ImageResource& image) {
@@ -154,6 +157,14 @@ const DescriptorBinding* FindBinding(const BindingLayout& layout, DescriptorBind
 		}
 	}
 	return nullptr;
+}
+
+bool IsNanTraced(uint64_t shader_hash) {
+	static const uint64_t traced = [] {
+		const char* text = std::getenv("KYTY_NAN_TRACE");
+		return text != nullptr ? std::strtoull(text, nullptr, 16) : uint64_t {0};
+	}();
+	return traced != 0 && traced == shader_hash;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

@@ -1,11 +1,13 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-
 #include "common/assert.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include <algorithm>
 #include <bit>
+#include <cinttypes>
+#include <cstdio>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -57,11 +59,11 @@ struct StructuredFunctionState {
 
 struct DispatcherFunctionState {
 	std::array<std::unordered_map<const IR::Inst*, uint32_t>, 2> spills;
-	uint32_t                                      header_label       = 0;
-	uint32_t                                      select_label       = 0;
-	uint32_t                                      after_switch_label = 0;
-	uint32_t                                      continue_label     = 0;
-	uint32_t                                      merge_label        = 0;
+	uint32_t                                                     header_label       = 0;
+	uint32_t                                                     select_label       = 0;
+	uint32_t                                                     after_switch_label = 0;
+	uint32_t                                                     continue_label     = 0;
+	uint32_t                                                     merge_label        = 0;
 };
 
 void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState& dispatcher,
@@ -110,10 +112,10 @@ uint32_t BranchCondition(ValueEmitContext& ctx, const IR::BlockInfo& info) {
 	const auto result = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), low, ballot, 0);
 	ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), high, ballot, 1);
-	const auto kind     = info.terminator.condition;
-	const bool zero     = kind == CFG::BranchCondition::ExecZero ||
-	                      kind == CFG::BranchCondition::VccZero ||
-	                      kind == CFG::BranchCondition::SccZero;
+	const auto kind = info.terminator.condition;
+	const bool zero = kind == CFG::BranchCondition::ExecZero ||
+	                  kind == CFG::BranchCondition::VccZero ||
+	                  kind == CFG::BranchCondition::SccZero;
 	const auto combined =
 	    EmitBinaryU32(ctx.state, zero ? spv::OpBitwiseAnd : spv::OpBitwiseOr, low, high);
 	ctx.state.builder.AddFunction(zero ? spv::OpIEqual : spv::OpINotEqual, TypeBool(ctx.state),
@@ -123,7 +125,7 @@ uint32_t BranchCondition(ValueEmitContext& ctx, const IR::BlockInfo& info) {
 
 void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block,
                               const IR::BlockInfo& info) {
-	const auto& program = ctx.state.program;
+	const auto& program    = ctx.state.program;
 	const auto& term       = info.terminator;
 	const auto  emit_merge = [&]() {
 		if (term.loop_header) {
@@ -316,6 +318,85 @@ void EmitDispatcherInstruction(ValueEmitContext& ctx, const DispatcherFunctionSt
 	}
 }
 
+// Diagnostics (KYTY_NAN_TRACE): record the first instruction that turns finite operands into a
+// NaN or an infinity. Slot 0 of the trace buffer is a sink so the store stays branchless.
+void EmitNanTrace(ValueEmitContext& lane, const IR::Inst& inst) {
+	auto& state = lane.state;
+	if (state.nan_trace_variable == 0 || inst.GetType() != IR::Type::F32 ||
+	    inst.GetOpcode() == IR::ValueOpcode::Phi) {
+		return;
+	}
+	const auto found = lane.definitions.find(&inst);
+	if (found == lane.definitions.end()) {
+		return;
+	}
+	// A bit cast only forwards a value that travelled through the integer domain (register
+	// merges); it is an origin only when the bits come straight from a load or a sample.
+	std::string_view source_name;
+	if (inst.GetOpcode() == IR::ValueOpcode::BitCastF32U32 && inst.NumArgs() != 0) {
+		const auto* bits = inst.Arg(0).Resolve().TryInstruction();
+		if (bits == nullptr) {
+			return;
+		}
+		source_name      = IR::ValueOpcodeName(bits->GetOpcode());
+		const bool input = source_name.starts_with("Load") || source_name.starts_with("Image") ||
+		                   source_name.starts_with("Read") ||
+		                   source_name.starts_with("Composite") || source_name.starts_with("Get");
+		if (!input) {
+			return;
+		}
+	}
+	const auto ordinal = state.nan_trace_ordinal++;
+	if (ordinal + 1u >= IR::NanTraceSlots) {
+		return;
+	}
+	uint32_t    start_pc = 0;
+	uint32_t    end_pc   = 0;
+	const auto& program  = state.program;
+	const auto  block    = std::ranges::find(program.blocks, state.current_block);
+	if (block != program.blocks.end() && program.blocks.size() == program.block_info.size()) {
+		const auto& info = program.block_info[static_cast<size_t>(block - program.blocks.begin())];
+		start_pc         = info.start_pc;
+		end_pc           = info.end_pc;
+	}
+	const auto name = IR::ValueOpcodeName(inst.GetOpcode());
+	std::fprintf(stderr,
+	             "nan-trace legend: hash=0x%016" PRIx64
+	             " slot=%u half=%u op=%.*s%s%.*s block=0x%x..0x%x\n",
+	             program.shader_hash, ordinal, state.lane_half, static_cast<int>(name.size()),
+	             name.data(), source_name.empty() ? "" : "<-", static_cast<int>(source_name.size()),
+	             source_name.data(), start_pc, end_pc);
+
+	const auto value       = found->second;
+	auto       operand_nan = ConstantBool(state, false);
+	auto       operand_bad = ConstantBool(state, false);
+	for (size_t index = 0; index < inst.NumArgs(); index++) {
+		const auto* source = inst.Arg(index).Resolve().TryInstruction();
+		if (source == nullptr || source->GetType() != IR::Type::F32) {
+			continue;
+		}
+		const auto operand = lane.Def(inst.Arg(index));
+		const auto is_nan  = Unary(state, spv::OpIsNan, TypeBool(state), operand);
+		const auto is_inf  = Unary(state, spv::OpIsInf, TypeBool(state), operand);
+		operand_nan        = Binary(state, spv::OpLogicalOr, TypeBool(state), operand_nan, is_nan);
+		operand_bad = Binary(state, spv::OpLogicalOr, TypeBool(state), operand_bad,
+		                     Binary(state, spv::OpLogicalOr, TypeBool(state), is_nan, is_inf));
+	}
+	const auto record = [&](spv::Op test, uint32_t operands_bad, uint32_t slot) {
+		const auto bad    = Unary(state, test, TypeBool(state), value);
+		const auto clean  = Unary(state, spv::OpLogicalNot, TypeBool(state), operands_bad);
+		const auto origin = Binary(state, spv::OpLogicalAnd, TypeBool(state), bad, clean);
+		const auto index =
+		    Select(state, TypeU32(state), origin, ConstantU32(state, slot), ConstantU32(state, 0));
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state),
+		                          pointer, state.nan_trace_variable, ConstantU32(state, 0), index);
+		state.builder.AddFunction(spv::OpStore, pointer, ConstantU32(state, 1));
+	};
+	record(spv::OpIsNan, operand_nan, ordinal + 1u);
+	record(spv::OpIsInf, operand_bad, IR::NanTraceSlots + ordinal + 1u);
+}
+
 template <typename EmitInstruction>
 void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& emit_instruction) {
 	ctx.state.current_block = block;
@@ -335,6 +416,7 @@ void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& 
 			if (half == 0 || (inst.GetOpcode() != IR::ValueOpcode::Barrier &&
 			                  inst.GetOpcode() != IR::ValueOpcode::MeshAllocate)) {
 				emit_instruction(lane, inst);
+				EmitNanTrace(lane, inst);
 			}
 		}
 		ctx.state.lane_half = 0;
@@ -357,7 +439,7 @@ void PatchStructuredPhis(ValueEmitContext& ctx, StructuredFunctionState& structu
 }
 
 void EmitStructuredFunction(ValueEmitContext& ctx) {
-	const auto& program = ctx.state.program;
+	const auto&             program = ctx.state.program;
 	StructuredFunctionState structured;
 	ctx.state.builder.AddFunction(spv::OpBranch, ctx.Label(program.blocks.front()));
 	for (size_t index = 0; index < program.blocks.size(); index++) {
@@ -552,9 +634,9 @@ uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t 
 	}
 	const auto physical_lane =
 	    EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31));
-	const auto high          = state.builder.AllocateId();
-	const auto in_high       = state.builder.AllocateId();
-	const auto value         = state.builder.AllocateId();
+	const auto high    = state.builder.AllocateId();
+	const auto in_high = state.builder.AllocateId();
+	const auto value   = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope,
 	                          HalfArg(inst, index, 0), physical_lane);
 	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, high, scope,
