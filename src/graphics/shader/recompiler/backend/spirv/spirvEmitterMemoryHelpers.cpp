@@ -76,10 +76,9 @@ static void EnsureLdsStorage(EmitterState& state) {
 	state.builder.AddName(state.lds_variable, "lds_dwords");
 }
 
-MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
-                                                         const IR::MemoryInfo& mem,
-                                                         uint32_t variable,
-                                                         uint32_t pointer_type) {
+MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState&         state,
+                                                        const IR::MemoryInfo& mem,
+                                                        uint32_t variable, uint32_t pointer_type) {
 	if (variable == 0) {
 		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Buffers, mem.resource,
 		                             "storage buffer descriptor array was not emitted");
@@ -125,12 +124,11 @@ MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::
 			return access;
 		case IR::ResourceKind::ScalarAddress:
 		case IR::ResourceKind::Flat:
-		case IR::ResourceKind::Global:
-			EXIT("physical address memory must use the BDA emitter\n");
+		case IR::ResourceKind::Global: EXIT("physical address memory must use the BDA emitter\n");
 		case IR::ResourceKind::ScalarBuffer:
 		case IR::ResourceKind::Buffer: {
-			access = PrepareStorageBufferResourceAccess(
-			    state, mem, state.storage_buffer_variable, TypeStorageBufferPointer(state));
+			access = PrepareStorageBufferResourceAccess(state, mem, state.storage_buffer_variable,
+			                                            TypeStorageBufferPointer(state));
 			access.index_offset = EmitBinaryU32(state, spv::OpShiftRightLogical, access.byte_offset,
 			                                    ConstantU32(state, 2u));
 			access.add_index_offset = true;
@@ -173,9 +171,8 @@ uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAcces
 	                                       TypeStorageBufferElementPointer(state));
 }
 
-uint32_t EmitStorageBufferElementPointer(EmitterState& state,
-                                         const MemoryResourceAccess& access, uint32_t index,
-                                         uint32_t pointer_type) {
+uint32_t EmitStorageBufferElementPointer(EmitterState& state, const MemoryResourceAccess& access,
+                                         uint32_t index, uint32_t pointer_type) {
 	const auto pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, pointer_type, pointer, access.object_pointer,
 	                          ConstantU32(state, 0), index);
@@ -210,7 +207,7 @@ uint32_t EmitUFloatToF32Bits(EmitterState& state, uint32_t raw, uint32_t bits) {
 	                                            ConstantU32(state, 23u - mantissa_bits));
 	const auto normal_bits =
 	    EmitBinaryU32(state, spv::OpBitwiseOr, exponent_bits, mantissa_bits_32);
-	const auto normal      = EmitBitcastU32ToF32(state, normal_bits);
+	const auto normal = EmitBitcastU32ToF32(state, normal_bits);
 
 	const auto special_bits =
 	    EmitBinaryU32(state, spv::OpBitwiseOr, ConstantU32(state, 0x7f800000u), mantissa_bits_32);
@@ -281,6 +278,67 @@ uint32_t NormalizeFormatComponent(EmitterState& state, const Format::BufferForma
 	}
 }
 
+// Inverse of NormalizeFormatComponent: a formatted store hands the hardware a float (or integer)
+// register and the buffer's format decides the stored encoding. Float-to-integer conversions
+// follow the typed-UAV rules: NaN becomes zero, the value is clamped to the representable range
+// and normalized formats round to nearest; float16 rounds toward zero.
+uint32_t EncodeFormatComponent(EmitterState& state, const Format::BufferFormatInfo& info,
+                               uint32_t component, uint32_t value) {
+	const auto bits = info.component_bits[component];
+	if (bits == 0u || bits >= 32u) {
+		return value;
+	}
+	const auto clamped_float = [&](float low, float high) {
+		const auto source  = EmitBitcastU32ToF32(state, value);
+		const auto clamped = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state),
+		                          GLSLstd450FClamp, source, ConstantF32Value(state, low),
+		                          ConstantF32Value(state, high));
+		const auto is_nan = Binary(state, spv::OpFUnordNotEqual, TypeBool(state), source, source);
+		return Select(state, TypeF32(state), is_nan, ConstantF32Value(state, 0.0f), clamped);
+	};
+	const auto to_unsigned = [&](uint32_t source) {
+		return Unary(state, spv::OpConvertFToU, TypeU32(state), source);
+	};
+	const auto to_signed = [&](uint32_t source) {
+		const auto converted = Unary(state, spv::OpConvertFToS, TypeI32(state), source);
+		return Unary(state, spv::OpBitcast, TypeU32(state), converted);
+	};
+	switch (info.type) {
+		case Format::ComponentType::Unorm: {
+			const auto max_value = static_cast<float>((1u << bits) - 1u);
+			const auto scaled =
+			    Binary(state, spv::OpFMul, TypeF32(state), clamped_float(0.0f, 1.0f),
+			           ConstantF32Value(state, max_value));
+			return to_unsigned(
+			    Binary(state, spv::OpFAdd, TypeF32(state), scaled, ConstantF32Value(state, 0.5f)));
+		}
+		case Format::ComponentType::Snorm: {
+			const auto max_value = static_cast<float>((1u << (bits - 1u)) - 1u);
+			const auto scaled =
+			    Binary(state, spv::OpFMul, TypeF32(state), clamped_float(-1.0f, 1.0f),
+			           ConstantF32Value(state, max_value));
+			const auto negative = Binary(state, spv::OpFOrdLessThan, TypeBool(state), scaled,
+			                             ConstantF32Value(state, 0.0f));
+			const auto bias = Select(state, TypeF32(state), negative,
+			                         ConstantF32Value(state, -0.5f), ConstantF32Value(state, 0.5f));
+			return to_signed(Binary(state, spv::OpFAdd, TypeF32(state), scaled, bias));
+		}
+		case Format::ComponentType::Uscaled:
+			return to_unsigned(clamped_float(0.0f, static_cast<float>((1u << bits) - 1u)));
+		case Format::ComponentType::Sscaled: {
+			const auto limit = static_cast<float>(1u << (bits - 1u));
+			return to_signed(clamped_float(-limit, limit - 1.0f));
+		}
+		case Format::ComponentType::Float:
+			if (bits == 16u) {
+				return EmitF32ToF16RtzBits(state, EmitBitcastU32ToF32(state, value));
+			}
+			return value;
+		default: return value;
+	}
+}
+
 void EmitDeviceAtomicMemoryBarrier(EmitterState& state) {
 	const auto semantics =
 	    spv::MemorySemanticsAcquireReleaseMask | spv::MemorySemanticsUniformMemoryMask;
@@ -296,22 +354,21 @@ uint32_t EmitFloatAtomicReplacement(EmitterState& state, uint32_t old, uint32_t 
 		uint32_t key;
 	};
 	const auto classify = [&](uint32_t bits) {
-		const auto cls = EmitClassifyF32Bits(state, bits);
+		const auto cls      = EmitClassifyF32Bits(state, bits);
 		const auto negative = EmitCompareU32Constant(state, spv::OpINotEqual,
 		                                             EmitAndConstant(state, bits, 0x80000000u), 0u);
 		const auto negative_key = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpNot, TypeU32(state), negative_key, bits);
 		const auto positive_key =
 		    EmitBinaryU32(state, spv::OpBitwiseXor, bits, ConstantU32(state, 0x80000000u));
-		return OrderedBits {
-		    cls.nan, cls.zero,
-		    EmitSelectValueU32(state, negative, negative_key, positive_key)};
+		return OrderedBits {cls.nan, cls.zero,
+		                    EmitSelectValueU32(state, negative, negative_key, positive_key)};
 	};
 	const auto source_class = classify(source);
 	const auto old_class    = classify(old);
-	const auto unordered = EmitLogicalOrBool(
-	    state, EmitLogicalOrBool(state, source_class.nan, old_class.nan),
-	    EmitLogicalAndBool(state, source_class.zero, old_class.zero));
+	const auto unordered =
+	    EmitLogicalOrBool(state, EmitLogicalOrBool(state, source_class.nan, old_class.nan),
+	                      EmitLogicalAndBool(state, source_class.zero, old_class.zero));
 	const auto compare = state.builder.AllocateId();
 	state.builder.AddFunction(max_value ? spv::OpUGreaterThan : spv::OpULessThan, TypeBool(state),
 	                          compare, source_class.key, old_class.key);

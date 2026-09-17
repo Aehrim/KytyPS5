@@ -21963,6 +21963,50 @@ TestCase BufferStoreFormatXResource16UintWritesHalfword() {
   return test;
 }
 
+TestCase BufferStoreFormatXResource16FloatEncodesHalf() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 0);
+  AppendVMovLiteral(&code, 0, 0x3f800000u);
+  code.push_back(EncodeMubuf0(0x04u));
+  code.push_back(EncodeMubuf1(0, 0, 20));
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "BufferStoreFormatXResource16FloatEncodesHalf";
+  test.code = code;
+  test.initial = {0x11223344u};
+  test.expected = {0x11223c00u};
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_STORE_FORMAT_X, O::S_ENDPGM};
+  test.user_data = MakeStructuredStorageBufferData(
+      0, 4, false, BufferFormat(Prospero::BufferFormat::k16Float));
+  test.has_user_data = true;
+  return test;
+}
+
+TestCase BufferStoreFormatXResource8UnormEncodesByte() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 0);
+  AppendVMovLiteral(&code, 0, 0x3e800000u);
+  code.push_back(EncodeMubuf0(0x04u));
+  code.push_back(EncodeMubuf1(0, 0, 20));
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "BufferStoreFormatXResource8UnormEncodesByte";
+  test.code = code;
+  test.initial = {0x11223344u};
+  test.expected = {0x11223340u};
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_STORE_FORMAT_X, O::S_ENDPGM};
+  test.user_data = MakeStructuredStorageBufferData(
+      0, 4, false, BufferFormat(Prospero::BufferFormat::k8UNorm));
+  test.has_user_data = true;
+  return test;
+}
+
 TestCase BufferStoreFormatXResource16UintPreservesAdjacentLanes() {
   using O = ShaderOpcode;
 
@@ -26476,6 +26520,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(BufferLoadFormatXyzwInactiveExecPreservesOverlappingAddress);
   AddCase(BufferFormatStoreVariants);
   AddCase(BufferStoreFormatXResource16UintWritesHalfword);
+  AddCase(BufferStoreFormatXResource16FloatEncodesHalf);
+  AddCase(BufferStoreFormatXResource8UnormEncodesByte);
   AddCase(BufferStoreFormatXResource16UintPreservesAdjacentLanes);
   AddCase(BufferLoadFormatXResource8UintZeroExtendsByte);
   AddCase(BufferLoadFormatXyResource88UintExtractsBytes);
