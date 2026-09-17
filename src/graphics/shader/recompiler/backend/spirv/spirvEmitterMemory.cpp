@@ -510,32 +510,6 @@ void StoreWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) 
 	});
 }
 
-void FormattedStorePrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
-                            uint32_t component, const MemoryResourceAccess& resource,
-                            uint32_t data) {
-	const auto info = Format::GetFormatInfo(BufferFormat(ctx, mem));
-	if (info.type == Format::ComponentType::Unknown) {
-		StoreWordPrepared(ctx, inst, RebaseRawComponent(mem, component), resource, data);
-		return;
-	}
-	if (component >= info.component_count) return;
-	const auto bits          = info.component_bits[component];
-	const auto component_mem = RebaseFormattedComponent(mem, info, component);
-	const auto encoded       = EncodeFormatComponent(ctx.state, info, component, data);
-	if (bits == 8u || bits == 16u) {
-		StoreSubwordPrepared(ctx, inst, component_mem, resource, bits, encoded);
-	} else {
-		StoreWordPrepared(ctx, inst, component_mem, resource, encoded);
-	}
-}
-
-void FormattedStore(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
-	EmitIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
-		FormattedStorePrepared(ctx, inst, mem, 0u, resource, ctx.Arg(inst, inst.NumArgs() - 2));
-	});
-}
-
 spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode) {
 	switch (opcode) {
 		case IR::ValueOpcode::BufferAtomicCmpSwap32: return spv::OpAtomicCompareExchange;
@@ -733,6 +707,22 @@ void StoreFormattedInBounds(ValueEmitContext& ctx, const IR::MemoryInfo& mem,
 	} else {
 		StoreWordInBounds(ctx, plan.resource, plan.indices[component], encoded);
 	}
+}
+
+void FormattedStore(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
+	EmitIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
+		const auto data     = ctx.Arg(inst, inst.NumArgs() - 2);
+		const auto info     = Format::GetFormatInfo(BufferFormat(ctx, mem));
+		if (info.type == Format::ComponentType::Unknown) {
+			StoreWordPrepared(ctx, inst, RebaseRawComponent(mem, 0u), resource, data);
+			return;
+		}
+		const auto plan =
+		    PrepareFormattedMemory(ctx, inst, mem, resource, info, 1u, FormattedAccess::Store);
+		EmitIfCondition(ctx.state, plan.in_bounds,
+		                [&]() { StoreFormattedInBounds(ctx, mem, plan, 0u, data); });
+	});
 }
 
 uint32_t LoadWideBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t components) {
