@@ -365,6 +365,20 @@ Nächste Brocken laut Profil: `Dispatch::BindAndEmit` 29 µs × 184k (5,3 s von 
 (`ResolveRenderColorTarget` 5,6 µs), CS-Materialisierung trotz Treffer 14,5 µs (Uniform-Fill-Auswertung, indirekte
 Tabellen, Vektor-Kopien).
 
+**Dispatch-Pfad (Läufe 55/56):** feinere Zonen zeigten `DispatchIndirect::ReadArgs` ≈ 0,5 ms (CPU liest GPU-geschriebene
+Gruppenzahlen → Seitenfehler → Download) und `Dispatch::PrepareBda` 286 µs (läuft vor jedem DMA-Dispatch über alle
+Buffer aller gemappten Bereiche). Fixes: `vkCmdDispatchIndirect` für GPU-dirty Argumente (`d60a7e8`,
+`CpOpDispatchIndirect` 256 → 109 µs) und Überspringen des BDA-Abgleichs, solange CPU-Dirty-Epoche, Buffer-
+Registrierungen und Mappings stillstehen (`a4c4b54`, Zone verschwindet aus dem Profil; `BindAndEmit` 29 → 21 µs).
+Bild unverändert (Sichtprüfung im Tunnel). **fps trotzdem ~2,8** (69 vs. 70 Presents/25 s): die eingesparten ~4 s
+wurden in diesem Lauf von langsameren anderen Zonen aufgezehrt – die Lauf-zu-Lauf-Streuung liegt bei ±15 %
+(Hintergrundlast, Takt). Per-Thread-Auswertung (`tracy-csvexport -u`, nach `thread` aggregiert): **ein einziger
+Command-Processor-Thread** trägt alles (22,9 s von 25 s), der Flip-Thread ist idle.
+Konsequenzen: (1) für belastbare Vergleiche künftig eine feste Szene mehrfach messen und Zeit *pro Befehl* statt fps
+vergleichen; (2) strukturell hilft nur, die Arbeit pro Draw weiter zu senken (Image-Churn der Nebel-Layer:
+~70–200 `Image::Image`/s à 0,5–1,4 ms; `ResolveRenderColorTarget`; `ExecutePreparedDraw`) oder sie auf mehrere
+Threads zu verteilen (Deskriptor-Vorbereitung parallel zur Vulkan-Aufzeichnung).
+
 **Weitere Fixes dieser Runde** (`a5b52e8`): Upload-Quelle mit entmapptem Ende (Absturz in `memcpy`, Lauf 50) → nur
 den gemappten Teil kopieren; 561-MiB-Image-Upload aus unplausiblem Deskriptor (Lauf 52) → Upload überspringen.
 
