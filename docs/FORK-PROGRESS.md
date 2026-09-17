@@ -287,6 +287,36 @@ sauberes Ende, VS 208 / PS 347 / CS 743. Entscheidend waren die formatierten Buf
 RGB = NaN). Ob der Tracer das Bild beeinflusst (Compiler-Optimierung der NaN-Vergleiche) oder es Zufall/Meilenstein
 28 war, klärt Kontrolllauf 42 ohne Tracer.
 
+**Kontrollläufe:** Lauf 42 (gleiche Binary, ohne Tracer) rendert die Welt ebenfalls korrekt und bleibt über 1523 Flips
+stabil → der Tracer beeinflusst das Bild nicht. Lauf 43 (gleiche Binary, `--profile`) wurde in der Welt wieder
+**schwarz**, Lauf 44 (Tracer + `--profile`) war gut: das Schwarz ist **intermittierend** (Problem 12 bleibt offen,
+Timing-Verdacht). Die im guten Lauf aktiven NaN-Quellen des Nebel-Shaders (Rückprojektion, Licht-Record +12/+320,
+`rsqrt(0)` in der GI-Probe-Schleife bei Voxeln exakt auf einem Probe-Gitterpunkt) sind alle vom Spiel geschützt
+(`V_CMP_CLASS`, unordered Compares, NaN-sicheres `V_MAX`) – die Schwarz-Ursache liegt woanders.
+
+### 2026-09-17 – Erste Performance-Messung (Tracy)
+
+Setup: `winget install wolfpld.tracy` (0.14.1 = Version des eingebundenen Clients), Emulator mit `--profile`
+(Tracy on-demand), Aufnahme headless: `tracy-capture -o tunnel.tracy -f -s 25`, Auswertung:
+`tracy-csvexport tunnel.tracy > zones.csv` (liegt unter `_Build/logs/run44/`).
+
+Tutorial-Tunnel, 25 s, 43 Presents (**1,7 fps**): `CommandProcessor::Process` 22,7 s (91 % eines Threads) – der
+Emulator ist **CPU-gebunden im Command-Processor-Thread**, die GPU wartet.
+
+| Zone | Anzahl | Mittel | Summe |
+|---|---|---|---|
+| `RenderExecutor::DrawIndex` (in `CpOpDrawIndirect` 242k, `CpOpDrawIndexOffset` 27k) | 270k | 45 µs | 12,1 s |
+| `CpOpDispatchDirect` | 107k | 45 µs | 4,8 s |
+| `CpOpDispatchIndirect` | 10,8k | 277 µs | 3,0 s |
+| `DrawAuto` | 7,6k | 230 µs | 1,8 s |
+| `ResolveRenderColor` | 310k | 5,4 µs | 1,7 s |
+| `Image::Image` (Vulkan-Image-Erzeugung) | 1,8k | 284 µs | 0,5 s |
+| `PrepareBinding` / `FindBuffers` / `RebindBuffers` / `CommitBindings` | je ~650k | ~1 µs | je 0,4–0,9 s |
+
+≈ 6300 Draws + 2500 Dispatches pro präsentiertem Bild × 45 µs ≈ 400–500 ms/Bild. Ziel 60 fps ⇒ ≈ 2 µs pro Befehl
+(Faktor ~25). Die instrumentierten Teilschritte erklären nur ~11 der 45 µs pro Draw; der Rest (Deskriptor-
+Materialisierung/`SrtWalker`, Textur-Auflösung, Vulkan-Aufrufe, Speicher-Tracking) braucht feinere Zonen.
+
 **RenderDoc-Praxis:** Mit `--rd` belegt der Emulator in der Welt 22–24 GB statt ~10 GB; bei 32 GB RAM und weiteren
 offenen Programmen lagert Windows aus und ein 2-Flip-Capture dauert > 20 min. Vor Captures alles schließen;
 ggf. `renderDoc.cpp` auf 1 Flip umstellen. Der clang-format-Hook (v22.1.3) formatiert ganze Dateien anders als

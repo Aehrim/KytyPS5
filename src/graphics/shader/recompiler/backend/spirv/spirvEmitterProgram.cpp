@@ -333,12 +333,21 @@ void EmitNanTrace(ValueEmitContext& lane, const IR::Inst& inst) {
 	// A bit cast only forwards a value that travelled through the integer domain (register
 	// merges); it is an origin only when the bits come straight from a load or a sample.
 	std::string_view source_name;
+	uint32_t         source_offset = 0;
+	uint32_t         source_pc     = 0;
 	if (inst.GetOpcode() == IR::ValueOpcode::BitCastF32U32 && inst.NumArgs() != 0) {
 		const auto* bits = inst.Arg(0).Resolve().TryInstruction();
 		if (bits == nullptr) {
 			return;
 		}
-		source_name      = IR::ValueOpcodeName(bits->GetOpcode());
+		source_name = IR::ValueOpcodeName(bits->GetOpcode());
+		if (source_name.starts_with("Read") || source_name.starts_with("Load")) {
+			const auto flags = bits->Flags<IR::MemoryFlags>();
+			source_pc        = flags.pc;
+			if (flags.index < state.program.memory_info.size()) {
+				source_offset = state.program.memory_info[flags.index].offset;
+			}
+		}
 		const bool input = source_name.starts_with("Load") || source_name.starts_with("Image") ||
 		                   source_name.starts_with("Read") ||
 		                   source_name.starts_with("Composite") || source_name.starts_with("Get");
@@ -362,10 +371,10 @@ void EmitNanTrace(ValueEmitContext& lane, const IR::Inst& inst) {
 	const auto name = IR::ValueOpcodeName(inst.GetOpcode());
 	std::fprintf(stderr,
 	             "nan-trace legend: hash=0x%016" PRIx64
-	             " slot=%u half=%u op=%.*s%s%.*s block=0x%x..0x%x\n",
+	             " slot=%u half=%u op=%.*s%s%.*s block=0x%x..0x%x src_off=%u src_pc=0x%x\n",
 	             program.shader_hash, ordinal, state.lane_half, static_cast<int>(name.size()),
 	             name.data(), source_name.empty() ? "" : "<-", static_cast<int>(source_name.size()),
-	             source_name.data(), start_pc, end_pc);
+	             source_name.data(), start_pc, end_pc, source_offset, source_pc);
 
 	const auto value       = found->second;
 	auto       operand_nan = ConstantBool(state, false);
