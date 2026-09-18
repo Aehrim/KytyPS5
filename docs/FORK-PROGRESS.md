@@ -604,6 +604,35 @@ Nächster Schritt (Rendering-Session): RenderDoc in den ersten Sekunden nach dem
 SRT-Offset 3120) und Kachelmasken dumpen – wer schreibt die Records, und sind die NaN-Einträge Lichter, die die
 Maske gar nicht enthalten dürfte (Culling-Pass) oder Werte, die auf der PS5 auch NaN wären (dann fehlt uns ein Guard).
 
+**GPU-Waits, zweiter Anlauf (2026-09-18, `3f11907`, Läufe 99–106).** Drei Experimente an der Rückleseschiene:
+1. *Express-Download:* Buffer merken den Tick ihres letzten GPU-Schreibzugriffs; ist er fertig, kopiert ein privater
+   Befehlspuffer mit eigenem Fence, statt die Warteschlange zu leeren (`KYTY_NO_EXPRESS_DOWNLOAD=1`). Allein: nichts –
+   die verbleibenden Reads warten auf Arbeit, die noch nicht einmal abgeschickt war.
+2. *Labels erst bei GPU-Fertigstellung* (`KYTY_DEFERRED_EOP=1`, Standard aus): Der Emulator schrieb EOP-Labels sofort
+   beim Aufzeichnen (`std::memcpy` in `WriteAtEndOfPipe`), das Spiel lief der GPU voraus und jeder Rücklesezugriff
+   musste die Warteschlange leeren. Korrekt verzögert: GPU-Waits 4,4 s → 0,7 s pro 25 s, DCC-Rücklesen 1,9 s → 0,1 s –
+   **aber 4,4–4,7 fps statt 5,9**, weil Demon's Souls seinen Befehlsstrom ~130k-mal pro 25 s per `WAIT_REG_MEM` auf
+   Labels warten lässt; jede Pause/Wiederaufnahme des Command-Processors kostet mehr als der Drain. Dazu nötig war
+   ein Kick-Merker für den GPU-Thread (verlorenes Wecksignal = 100 ms Schlaf) und ein Flush vor dem Suspend
+   (sonst Deadlock auf ein Label im noch nicht abgeschickten Puffer). GPU-Auslastung dabei nur 27–28 %.
+3. *Regelmäßiges Abschicken* (alle 400 Draws/Dispatches, `KYTY_SUBMIT_EVERY=<n>`): GPU arbeitet parallel zur
+   Aufzeichnung; Rücklesungen finden ihre Daten häufiger fertig vor. Mit sofortigen Labels + Express: **6,0 fps**
+   (Lauf 102), 6,4 fps in Lauf 106 (Heartbeat konstant 7). Das ist der committete Standard.
+
+**DCC-Metadaten-Rücklesen (lokal, `2b87fb4`, unverifiziert):** ~1000 Rücklesungen à 1,8 ms pro 25 s. Diagnose:
+Das Spiel löscht die Metadaten per DMA-Fill (Wert `0xffffffff`), der im Emulator über den *CPU*-Pfad läuft; die
+GPU-Markierung des Bereichs kommt nicht über `ObtainBuffer` (Watch-Log leer), sondern seitengranular aus den
+BDA-Zeigerzugriffen der Shader auf Nachbardaten. Der Buffer-Cache merkt sich jetzt uniforme Fills (CPU und GPU),
+`MaterializeDccClear` nimmt den Wert statt zurückzulesen; geschachtelte Fills gleichen Werts lassen den Merker
+bestehen (erste Fassung verwarf ihn – daher in Lauf 106 noch 1040 Rücklesungen). Lauf 107 mit dem Fix ist nicht
+mehr gemessen worden. **Offen:** messen, Bild prüfen (Clear-Erkennung!), dann pushen. Laut Sampler bleibt danach vor
+allem: Lesezugriffe der Spiel-Threads auf GPU-Ergebnisse (~14 %), `HandleFault` 255k Faults/25 s.
+
+**Sonstiges:** Beim Laden stand das Spiel einmal 34 s still, der GPU-Thread 20 s lang in *einem* `vkAllocateMemory`
+(Textur-Upload, Lauf 104). Karte: RX 9060 XT 16 GB, Adapter-Auslastung 11,7 GB → kein Speichermangel; Ursache offen.
+Gelegentlich scheitert der Start mit „failed to reserve guest address space“ (2× heute, einmal ohne Vorgänger-
+Prozess) – einfach neu starten. Logo-Video zeigte mit verzögerten Labels einen Bildfehler (Lauf 100).
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
