@@ -1341,17 +1341,9 @@ KYTY_CP_OP_PARSER(CpOpDispatchIndirect) {
 		uint32_t mode = buffer[2];
 
 		EXIT_NOT_IMPLEMENTED(args == nullptr);
-		// Handing this variant to vkCmdDispatchIndirect like the offset variant removes a GPU
-		// drain per dispatch but loses Demon's Souls' volumetric fog (runs 92/93, cause unknown),
-		// so the counts are still read here. CPU-written counts on a page that also holds GPU
-		// data come from the backing store, which does not fault.
-		DispatchIndirectArgs counts {};
-		if (!Libs::LibKernel::Memory::TryReadGpuCleanBacking(reinterpret_cast<uint64_t>(args),
-		                                                     &counts, sizeof(counts))) {
-			counts = *args;
-		}
-		cp.DispatchDirect(counts.thread_group_x, counts.thread_group_y, counts.thread_group_z,
-		                  mode);
+		// The counts may have been written by the GPU: reading them here would fault and drain
+		// the GPU. The renderer reads them itself or leaves them to vkCmdDispatchIndirect.
+		cp.DispatchDirect(0, 0, 0, mode, reinterpret_cast<uint64_t>(args));
 
 		return 3;
 	}
