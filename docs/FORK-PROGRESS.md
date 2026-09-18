@@ -592,6 +592,18 @@ wie der Nebel verschwindet (schlagartig/ausblendend, im Stand oder bei Bewegung)
 nicht – für Performance-Änderungen an Compute-Pfaden braucht es einen festen Vergleichs-Screenshot (gleiche Stelle,
 gleicher Zeitpunkt nach dem Spawn). Testsystem laut Fenstertitel: Ryzen 7 5800X, Radeon RX 9060 XT.
 
+**2026-09-18 – Upstream-Merge (`e891e24`, 12 Commits, konfliktfrei, Tests grün) und Nebel-Befund.** Problem 14
+bestätigt: Screenshot mit noch eingeblendetem Ortsnamen zeigt bereits keinen Nebel mehr – er lebt nur wenige Sekunden
+nach dem Spawn. Läuft ohne Image-Pool (`KYTY_NO_IMAGE_POOL=1`, Lauf 98) genauso; Host-Indirect-Dispatch (F3-
+Umschaltung) ändert nichts → **kein Performance-Artefakt**, die Dispatch-Änderung ist wieder drin (`9793850`).
+NaN-Tracer am Nebel-Licht-Shader `0xf0dc79c3467d5e0b` (Lauf 97): NaN/Inf entstehen nicht in der Rechnung, sondern
+stehen **schon in der Lichtliste**: Lichtindex aus `S_FF1(s77)` (Kachel-Lichtmaske), Record 0x180 Bytes; Feld
++12 = Inf (`S_BUFFER_LOAD_DWORD s80` @0x15f8, danach `V_CMP_LE_F32 s80, 0` als Guard), Felder +320/+324/+328 = NaN
+(aus `S_BUFFER_LOAD_DWORDX16 s0 @ offset 268` @0x1684 → s13..s15, ein vec3), gefolgt von `FPRecip` ab 0x28b0.
+Nächster Schritt (Rendering-Session): RenderDoc in den ersten Sekunden nach dem Spawn, Lichtliste (V# in s32,
+SRT-Offset 3120) und Kachelmasken dumpen – wer schreibt die Records, und sind die NaN-Einträge Lichter, die die
+Maske gar nicht enthalten dürfte (Culling-Pass) oder Werte, die auf der PS5 auch NaN wären (dann fehlt uns ein Guard).
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
