@@ -111,6 +111,9 @@ private:
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// Readback of a buffer whose GPU writes all completed: copies through a private command
+	// buffer and waits for that copy alone instead of draining the whole queue.
+	[[nodiscard]] bool TryExpressDownload(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Queues backing publication; callers wait before clearing dirty pages or reusing their data.
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
 
@@ -134,6 +137,10 @@ private:
 	StreamBuffer                                       m_stream_buffer;
 	StreamBuffer                                       m_download_buffer;
 	StreamBuffer                                       m_device_buffer;
+	Buffer                                             m_express_buffer;
+	vk::CommandPool                                    m_express_pool    = nullptr;
+	vk::CommandBuffer                                  m_express_command = nullptr;
+	vk::Fence                                          m_express_fence   = nullptr;
 	TextureCache&                                      m_texture_cache;
 	uint64_t                                           m_total_used_memory = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;

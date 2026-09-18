@@ -26,6 +26,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -108,6 +109,12 @@ void GuestGpu::Shutdown() {
 		m_thread.join();
 	}
 	m_shutdown_complete = true;
+}
+
+void GuestGpu::Kick() {
+	Common::LockGuard lock(m_queue_mutex);
+	m_kicked = true;
+	m_work_available.Signal();
 }
 
 bool GuestGpu::IsStopping() {
@@ -336,6 +343,46 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 	return false;
 }
 
+// On the console an end-of-pipe label is written when the GPU has finished the preceding work;
+// this emulator writes it at record time, so the title runs ahead of the GPU and its readbacks
+// of GPU results have to drain the queue. Writing the labels at completion (KYTY_DEFERRED_EOP=1)
+// removes those drains but costs more than it saves: Demon's Souls then suspends the command
+// processor at 130k WAIT_REG_MEM packets per 25 s (runs 100/101: 4.4-4.7 fps against 6.0).
+static bool ImmediateEndOfPipeWrites() noexcept {
+	static const bool immediate = std::getenv("KYTY_DEFERRED_EOP") == nullptr;
+	return immediate;
+}
+
+// The recording is submitted every few hundred commands so the GPU executes while the frame is
+// still being recorded and readbacks find their data done. KYTY_SUBMIT_EVERY=<n> tunes it,
+// 0 disables it.
+void CommandProcessor::NoteRecordedCommand() {
+	static const uint32_t submit_every = [] {
+		const char* text = std::getenv("KYTY_SUBMIT_EVERY");
+		return text != nullptr ? static_cast<uint32_t>(std::strtoul(text, nullptr, 10)) : 400u;
+	}();
+	if (submit_every == 0 || ++m_recorded_commands < submit_every) {
+		return;
+	}
+	m_recorded_commands = 0;
+	BufferFlush();
+}
+
+void CommandProcessor::WriteLabelAtEndOfPipe(void* dst, uint64_t value, size_t bytes) {
+	EXIT_IF(dst == nullptr || (bytes != sizeof(uint32_t) && bytes != sizeof(uint64_t)));
+	if (ImmediateEndOfPipeWrites()) {
+		std::memcpy(dst, &value, bytes);
+		return;
+	}
+	CheckBuffer();
+	m_deferred_labels_pending = true;
+	auto& gpu                 = m_renderer.GetGpu();
+	GetScheduler().DeferPriorityOperation([dst, value, bytes, &gpu] {
+		std::memcpy(dst, &value, bytes);
+		gpu.Kick();
+	});
+}
+
 template <typename T>
 void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t poll,
                                   uint32_t wait_op) {
@@ -346,6 +393,12 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 
 	(void)poll;
 	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+		// The label may be written by a deferred end-of-pipe operation of the command buffer
+		// still being recorded: submit it, or the wait would never end.
+		if (m_deferred_labels_pending) {
+			m_deferred_labels_pending = false;
+			BufferFlush();
+		}
 		SuspendPm4();
 	}
 }
@@ -507,7 +560,10 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					if (!gpu->m_kicked) {
+						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					}
+					gpu->m_kicked = false;
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -911,6 +967,7 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		     args.base_vertex, args.first_instance);
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
+	NoteRecordedCommand();
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count) {
@@ -1136,6 +1193,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		m_renderer.GetRenderExecutor().DispatchDirect(m_submit_id, CurrentBuffer(), thread_group_x,
 		                                              thread_group_y, thread_group_z, mode,
 		                                              indirect_args);
+		NoteRecordedCommand();
 	}
 
 	/*constexpr uint32_t DispatchInitiatorUseThreadDimensions = 1u << 5u;
@@ -1185,6 +1243,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		args.instance_count = m_num_instances;
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
+	NoteRecordedCommand();
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
@@ -1246,7 +1305,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 	auto write32 = [&](bool with_writeback) {
 		auto* dst  = static_cast<uint32_t*>(dst_gpu_addr);
 		auto  data = static_cast<uint32_t>(value);
-		std::memcpy(dst, &data, sizeof(data));
+		WriteLabelAtEndOfPipe(dst, data, sizeof(data));
 
 		if (with_interrupt) {
 			if (with_writeback) {
@@ -1296,7 +1355,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			} else {
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
-					std::memcpy(dst, &value, sizeof(value));
+					WriteLabelAtEndOfPipe(dst, value, sizeof(value));
 
 					if (with_interrupt) {
 						if (with_writeback) {
@@ -1386,7 +1445,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			if constexpr (sizeof(T) == sizeof(uint64_t)) {
 				const auto clock = Sync::ReadReferenceClock();
 				auto*      dst   = static_cast<uint64_t*>(dst_gpu_addr);
-				std::memcpy(dst, &clock, sizeof(clock));
+				WriteLabelAtEndOfPipe(dst, clock, sizeof(clock));
 				switch (cache_action) {
 					case 0x00:
 						if ((eop_event_type == 0x04 && event_index == 0x05) ||

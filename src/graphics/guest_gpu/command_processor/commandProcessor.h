@@ -62,6 +62,8 @@ public:
 
 	void            BufferInit();
 	void            BufferFlush();
+	void            WriteLabelAtEndOfPipe(void* dst, uint64_t value, size_t bytes);
+	void            NoteRecordedCommand();
 	void            BufferFlushAndWait();
 	void            BufferWait();
 	HW::Context&    GetCtx() { return m_ctx; }
@@ -176,6 +178,8 @@ private:
 	uint64_t  m_submit_id                   = 0;
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
+	bool      m_deferred_labels_pending     = false;
+	uint32_t  m_recorded_commands           = 0;
 };
 
 } // namespace Libs::Graphics

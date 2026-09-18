@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
@@ -25,6 +26,8 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+constexpr uint64_t ExpressDownloadCapacity = 8ull * 1024 * 1024;
 
 namespace {
 
@@ -119,6 +122,93 @@ void BufferCache::DeleteBuffer(BufferId id) {
 	} else {
 		m_slot_buffers.erase(id);
 	}
+}
+
+bool BufferCache::TryExpressDownload(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	static const bool enabled = std::getenv("KYTY_NO_EXPRESS_DOWNLOAD") == nullptr;
+	if (!enabled || buffer.last_gpu_write_tick >= m_scheduler.CurrentTick()) {
+		// Written by the command buffer still being recorded: only the normal path orders
+		// the copy behind it.
+		return false;
+	}
+	auto& master = m_scheduler.GetMasterSemaphore();
+	if (!master.IsFree(buffer.last_gpu_write_tick)) {
+		master.Refresh();
+		if (!master.IsFree(buffer.last_gpu_write_tick)) {
+			return false;
+		}
+	}
+	KYTY_PROFILER_BLOCK("BufferCache::ExpressDownload");
+	std::vector<vk::BufferCopy> copies;
+	uint64_t                    total_size     = 0;
+	const auto                  buffer_address = buffer.CpuAddress();
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+			    copies.emplace_back(start - buffer_address, total_size, end - start);
+			    total_size += Common::AlignUp(end - start, 64);
+		    });
+	    });
+	if (copies.empty()) {
+		return true;
+	}
+	if (total_size > ExpressDownloadCapacity) {
+		return false;
+	}
+	m_memory_tracker.ForEachDownloadRange<false>(vaddr, size,
+	                                             [&](uint64_t address, uint64_t bytes) noexcept {
+		                                             m_gpu_modified_ranges.Subtract(address, bytes);
+	                                             });
+
+	const auto device = m_graphics.device;
+	(void)device.resetFences(1, &m_express_fence);
+	m_express_command.reset();
+	vk::CommandBufferBeginInfo begin {};
+	begin.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+	m_express_command.begin(begin);
+	vk::BufferMemoryBarrier before {};
+	before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+	before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before.buffer              = buffer.Handle();
+	before.offset              = 0;
+	before.size                = buffer.Size();
+	m_express_command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                                  vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1,
+	                                  &before, 0, nullptr);
+	m_express_command.copyBuffer(buffer.Handle(), m_express_buffer.Handle(),
+	                             static_cast<uint32_t>(copies.size()), copies.data());
+	auto after          = before;
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eHostRead;
+	after.buffer        = m_express_buffer.Handle();
+	after.offset        = 0;
+	after.size          = total_size;
+	m_express_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                                  vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &after,
+	                                  0, nullptr);
+	m_express_command.end();
+	{
+		Common::LockGuard lock(m_graphics.queue_mutex);
+		vk::SubmitInfo    submit {};
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers    = &m_express_command;
+		const auto result         = m_graphics.queue.submit(1, &submit, m_express_fence);
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	}
+	{
+		KYTY_PROFILER_BLOCK("BufferCache::ExpressDownload::WaitCopy");
+		const auto result = device.waitForFences(1, &m_express_fence, VK_TRUE, UINT64_MAX);
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	}
+	m_express_buffer.Invalidate(0, total_size);
+	const auto* mapped = m_express_buffer.Mapped().data();
+	for (const auto& copy: copies) {
+		Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
+		                                      mapped + copy.dstOffset, copy.size);
+	}
+	return true;
 }
 
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
@@ -222,7 +312,26 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 32 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
+      m_express_buffer(graphics, scheduler, MemoryUsage::Download, 0,
+                       vk::BufferUsageFlagBits::eTransferDst, ExpressDownloadCapacity),
       m_texture_cache(texture_cache) {
+	{
+		vk::CommandPoolCreateInfo pool {};
+		pool.flags            = vk::CommandPoolCreateFlagBits::eTransient |
+		                        vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+		pool.queueFamilyIndex = graphics.queue_family;
+		EXIT_NOT_IMPLEMENTED(graphics.device.createCommandPool(&pool, nullptr, &m_express_pool) !=
+		                     vk::Result::eSuccess);
+		vk::CommandBufferAllocateInfo allocate {};
+		allocate.commandPool        = m_express_pool;
+		allocate.level              = vk::CommandBufferLevel::ePrimary;
+		allocate.commandBufferCount = 1;
+		EXIT_NOT_IMPLEMENTED(graphics.device.allocateCommandBuffers(
+		                         &allocate, &m_express_command) != vk::Result::eSuccess);
+		vk::FenceCreateInfo fence {};
+		EXIT_NOT_IMPLEMENTED(graphics.device.createFence(&fence, nullptr, &m_express_fence) !=
+		                     vk::Result::eSuccess);
+	}
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	std::memset(m_nan_trace_buffer.Mapped().data(), 0,
 	            static_cast<size_t>(m_nan_trace_buffer.Size()));
@@ -249,6 +358,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (m_express_fence != nullptr) {
+		m_graphics.device.destroyFence(m_express_fence);
+	}
+	if (m_express_pool != nullptr) {
+		m_graphics.device.destroyCommandPool(m_express_pool);
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -291,7 +406,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		const auto window_end =
 		    std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
 
-		if (DownloadBufferMemory(buffer, window_begin, window_end - window_begin)) {
+		if (TryExpressDownload(buffer, window_begin, window_end - window_begin)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(window_begin, window_end - window_begin);
+		} else if (DownloadBufferMemory(buffer, window_begin, window_end - window_begin)) {
 			KYTY_PROFILER_BLOCK("BufferCache::ReadMemory::WaitGpu");
 			const auto tick = m_scheduler.CurrentTick();
 			m_scheduler.Wait(tick);
@@ -524,6 +641,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
+		buffer.NoteGpuWrite(m_scheduler.CurrentTick());
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }

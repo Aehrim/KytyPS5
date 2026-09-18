@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -48,7 +49,7 @@ public:
 	[[nodiscard]] bool               IsCoherent() const noexcept { return m_coherent; }
 	[[nodiscard]] MemoryUsage        Usage() const noexcept { return m_usage; }
 	[[nodiscard]] uint64_t           CpuAddress() const noexcept { return m_cpu_address; }
-	[[nodiscard]] vk::DeviceAddress BufferDeviceAddress() const noexcept;
+	[[nodiscard]] vk::DeviceAddress  BufferDeviceAddress() const noexcept;
 	[[nodiscard]] uint64_t           Offset(uint64_t address) const noexcept {
 		return address - m_cpu_address;
 	}
@@ -72,6 +73,12 @@ public:
 	bool   is_deleted   = false;
 	int    stream_score = 0;
 	size_t lru_id       = 0;
+	// Scheduler tick of the last command buffer that wrote this buffer on the GPU. Once that
+	// tick completed, a readback no longer has to drain the queue.
+	uint64_t last_gpu_write_tick = 0;
+	void     NoteGpuWrite(uint64_t tick) noexcept {
+		last_gpu_write_tick = std::max(last_gpu_write_tick, tick);
+	}
 
 protected:
 	[[nodiscard]] GraphicContext&   Graphics() const noexcept { return *m_graphics; }
@@ -82,16 +89,16 @@ private:
 	                                              vk::AccessFlags source,
 	                                              vk::AccessFlags destination) const;
 
-	GraphicContext*               m_graphics    = nullptr;
-	CommandScheduler*             m_scheduler   = nullptr;
-	MemoryUsage                   m_usage       = MemoryUsage::DeviceLocal;
-	uint64_t                      m_cpu_address = 0;
-	vk::DeviceAddress             m_device_address = 0;
-	vk::Buffer                    m_buffer     = nullptr;
-	VmaAllocation                 m_allocation = nullptr;
-	uint64_t                      m_size;
-	bool                          m_coherent = false;
-	std::span<uint8_t>            m_mapped;
+	GraphicContext*    m_graphics       = nullptr;
+	CommandScheduler*  m_scheduler      = nullptr;
+	MemoryUsage        m_usage          = MemoryUsage::DeviceLocal;
+	uint64_t           m_cpu_address    = 0;
+	vk::DeviceAddress  m_device_address = 0;
+	vk::Buffer         m_buffer         = nullptr;
+	VmaAllocation      m_allocation     = nullptr;
+	uint64_t           m_size;
+	bool               m_coherent = false;
+	std::span<uint8_t> m_mapped;
 };
 
 class StreamBuffer final: public Buffer {

@@ -28,8 +28,10 @@ public:
 
 	void               Shutdown();
 	[[nodiscard]] bool IsStopping();
-	void               SendCommand(Common::UniqueFunction<void>&& command);
-	void               SendCommandSync(Common::UniqueFunction<void>&& command);
+	// Wakes the GPU thread so a suspended command processor retries its wait at once.
+	void Kick();
+	void SendCommand(Common::UniqueFunction<void>&& command);
+	void SendCommandSync(Common::UniqueFunction<void>&& command);
 
 	// Submitted command memory is borrowed and must remain valid until GPU execution completes.
 	void              Submit(std::span<const uint32_t> draw_commands,
@@ -81,13 +83,15 @@ private:
 	std::array<std::deque<Submission>, QueueCount> m_queues;
 	std::deque<Common::UniqueFunction<void>>       m_commands;
 	std::atomic_uint32_t                           m_pending_commands {0};
-	uint32_t                                       m_next_queue        = 0;
-	uint32_t                                       m_submission_count  = 0;
-	bool                                           m_processing        = false;
-	bool                                           m_graphics_done     = true;
-	bool                                           m_accepting         = true;
-	bool                                           m_stopping          = false;
-	bool                                           m_shutdown_complete = false;
+	uint32_t                                       m_next_queue       = 0;
+	uint32_t                                       m_submission_count = 0;
+	bool                                           m_processing       = false;
+	// A kick that arrived while no wait was in progress must not be lost.
+	bool m_kicked            = false;
+	bool m_graphics_done     = true;
+	bool m_accepting         = true;
+	bool m_stopping          = false;
+	bool m_shutdown_complete = false;
 
 	std::unique_ptr<CommandProcessor>                                m_gfx_cp;
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;
