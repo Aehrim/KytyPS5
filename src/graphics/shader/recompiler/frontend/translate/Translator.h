@@ -164,6 +164,7 @@ private:
 	bool FloatCube(const Decoder::Instruction& inst, uint32_t result_kind);
 	bool Integer16Shift(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool arithmetic);
 	bool Integer16Binary(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool sign);
+	bool V_MAD_I16(const Decoder::Instruction& inst);
 	bool V_MED3_I16(const Decoder::Instruction& inst);
 	bool PackedInteger16Shift(const Decoder::Instruction& inst, IR::ValueOpcode opcode,
 	                          bool arithmetic);
@@ -204,6 +205,7 @@ private:
 	bool    V_BFE_U32(const Decoder::Instruction& inst, bool sign);
 	bool    V_BFI_B32(const Decoder::Instruction& inst);
 	bool    S_BITCMP_B32(const Decoder::Instruction& inst, bool expected);
+	bool    S_BITCMP_B64(const Decoder::Instruction& inst, bool expected);
 	bool    V_ALIGNBIT_B32(const Decoder::Instruction& inst);
 	bool    V_ALIGNBYTE_B32(const Decoder::Instruction& inst);
 	bool    V_LSHL_ADD_U32(const Decoder::Instruction& inst);

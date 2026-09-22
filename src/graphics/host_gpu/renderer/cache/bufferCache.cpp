@@ -162,10 +162,10 @@ bool BufferCache::TryExpressDownload(Buffer& buffer, uint64_t vaddr, uint64_t si
 
 	const auto device = m_graphics.device;
 	(void)device.resetFences(1, &m_express_fence);
-	m_express_command.reset();
+	EXIT_NOT_IMPLEMENTED(m_express_command.reset() != vk::Result::eSuccess);
 	vk::CommandBufferBeginInfo begin {};
 	begin.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
-	m_express_command.begin(begin);
+	EXIT_NOT_IMPLEMENTED(m_express_command.begin(begin) != vk::Result::eSuccess);
 	vk::BufferMemoryBarrier before {};
 	before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
 	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
@@ -188,7 +188,7 @@ bool BufferCache::TryExpressDownload(Buffer& buffer, uint64_t vaddr, uint64_t si
 	m_express_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                                  vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &after,
 	                                  0, nullptr);
-	m_express_command.end();
+	EXIT_NOT_IMPLEMENTED(m_express_command.end() != vk::Result::eSuccess);
 	{
 		Common::LockGuard lock(m_graphics.queue_mutex);
 		vk::SubmitInfo    submit {};

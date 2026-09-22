@@ -312,6 +312,7 @@ constexpr OpcodeMap VOP3_OPCODE_LIST[] = {
     {0x345u, Opcode::V_XAD_U32},
     {0x346u, Opcode::V_LSHL_ADD_U32},
     {0x347u, Opcode::V_ADD_LSHL_U32},
+    {0x35eu, Opcode::V_MAD_I16},
     {0x360u, Opcode::V_READLANE_B32},
     {0x361u, Opcode::V_WRITELANE_B32},
     {0x362u, Opcode::V_LDEXP_F32},
@@ -424,7 +425,7 @@ bool IsNativeVop3F16TernaryOpcode(Opcode opcode) {
 }
 
 bool IsNativeVop3I16TernaryOpcode(Opcode opcode) {
-	return opcode == Opcode::V_MED3_I16;
+	return opcode == Opcode::V_MED3_I16 || opcode == Opcode::V_MAD_I16;
 }
 
 bool IsNativeVop3B16BinaryOpcode(Opcode opcode) {
@@ -520,13 +521,14 @@ constexpr Vop1SdwaRule VOP1_SDWA_RULES[] = {
     {Opcode::V_CVT_F32_U32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_CVT_F32_I32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_CVT_F32_UBYTE0, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
-    {Opcode::V_NOT_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
+    {Opcode::V_NOT_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), SdwaSelBytes() | SdwaSelWords(),
+     SdwaSelFull(), false},
     {Opcode::V_FFBL_B32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), 0, 0, false},
     {Opcode::V_CVT_F32_F16, SdwaSelWords() | SdwaSelFull(), 0, 0, true},
     {Opcode::V_CVT_F16_F32, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), SdwaSelWords(),
      SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), true},
-    {Opcode::V_CVT_F16_U16, SdwaSelWords() | SdwaSelFull(), SdwaSelWords(),
-     SdwaSelWords() | SdwaSelFull(), false},
+    {Opcode::V_CVT_F16_U16, SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), SdwaSelWords(),
+     SdwaSelBytes() | SdwaSelWords() | SdwaSelFull(), false},
     {Opcode::V_CVT_U16_F16, SdwaSelWords() | SdwaSelFull(), SdwaSelWords(),
      SdwaSelWords() | SdwaSelFull(), true},
     {Opcode::V_CVT_F16_I16, SdwaSelWords() | SdwaSelFull(), SdwaSelWords(),
@@ -616,13 +618,14 @@ bool SupportsVop1Clamp(Opcode opcode) {
 }
 
 bool ValidateVop1Sdwa(Instruction& inst, uint32_t opcode, uint32_t modifier) {
-	const auto dst_sel  = (modifier >> 8u) & 0x7u;
-	const auto dst_u    = (modifier >> 11u) & 0x3u;
-	const auto clamp    = (modifier >> 13u) & 0x1u;
-	const auto omod     = (modifier >> 14u) & 0x3u;
-	const auto src0_sel = (modifier >> 16u) & 0x7u;
-	const auto src0_neg = (modifier >> 20u) & 0x1u;
-	const auto src0_abs = (modifier >> 21u) & 0x1u;
+	const auto dst_sel   = (modifier >> 8u) & 0x7u;
+	const auto dst_u     = (modifier >> 11u) & 0x3u;
+	const auto clamp     = (modifier >> 13u) & 0x1u;
+	const auto omod      = (modifier >> 14u) & 0x3u;
+	const auto src0_sel  = (modifier >> 16u) & 0x7u;
+	const auto src0_sext = (modifier >> 19u) & 0x1u;
+	const auto src0_neg  = (modifier >> 20u) & 0x1u;
+	const auto src0_abs  = (modifier >> 21u) & 0x1u;
 
 	if (src0_sel > 6u || dst_sel > 6u) {
 		SetUnsupported(inst, Family::VOP1, opcode, "VOP1 SDWA selector is invalid");
@@ -638,7 +641,8 @@ bool ValidateVop1Sdwa(Instruction& inst, uint32_t opcode, uint32_t modifier) {
 		               "VOP1 SDWA destination selector is not supported");
 		return false;
 	}
-	if (!IsVop1SdwaSourceSupported(inst.opcode, src0_sel, src0_neg != 0u, src0_abs != 0u)) {
+	if (!IsVop1SdwaSourceSupported(inst.opcode, src0_sel, src0_neg != 0u, src0_abs != 0u) ||
+	    (inst.opcode == Opcode::V_CVT_F16_U16 && src0_sel <= 3u && src0_sext != 0u)) {
 		SetUnsupported(inst, Family::VOP1, opcode, "VOP1 SDWA source selector is not supported");
 		return false;
 	}
@@ -1362,7 +1366,8 @@ bool SupportsNativeVop3ResultModifiers(Opcode opcode) {
 }
 
 bool SupportsNativeVop3Clamp(Opcode opcode) {
-	return SupportsNativeVop3ResultModifiers(opcode) || UsesInexactClampControl(opcode);
+	return SupportsNativeVop3ResultModifiers(opcode) || UsesInexactClampControl(opcode) ||
+	       opcode == Opcode::V_MAD_I16;
 }
 
 bool HasUnsupportedNativeVop3Modifiers(Opcode opcode, bool permlane, bool mad_mix,
@@ -1383,7 +1388,7 @@ bool HasUnsupportedNativeVop3Modifiers(Opcode opcode, bool permlane, bool mad_mi
 		return opcode != Opcode::V_FMA_F16 && (clamp != 0u || omod != 0u);
 	}
 	if (IsNativeVop3I16TernaryOpcode(opcode)) {
-		return abs != 0u || clamp != 0u || omod != 0u || neg != 0u;
+		return abs != 0u || (clamp != 0u && !clamp_modifier) || omod != 0u || neg != 0u;
 	}
 	if (IsNativeVop3B16BinaryOpcode(opcode)) {
 		return abs != 0u || clamp != 0u || omod != 0u || neg != 0u;

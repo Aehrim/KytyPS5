@@ -25,6 +25,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/sampler.h"
+#include "common/stringUtils.h"
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "common/timer.h"
@@ -43,6 +44,7 @@
 #include "loader/systemContent.h"
 
 #include <cstdlib>
+#include <filesystem>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
@@ -221,7 +223,7 @@ static void ToggleDesktopFullscreen() {
 	}
 }
 
-static void GameEventKeyboard(WindowLoopState& game, const EventKeyboard& key) {
+static void GameEventKeyboard(const EventKeyboard& key) {
 	static SDL_Keycode fullscreen_key = SDLK_UNKNOWN;
 
 #ifdef KYTY_DBG_INPUT
@@ -234,7 +236,6 @@ static void GameEventKeyboard(WindowLoopState& game, const EventKeyboard& key) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	if (key.down) {
 		switch (key.key_code) {
-			case SDLK_SPACE: SetPause(game, !game.paused.load(std::memory_order_acquire)); break;
 			case SDLK_F1:
 				if (!key.repeat) {
 					RenderDocRequestCapture();
@@ -557,7 +558,7 @@ void WindowContext::ProcessEvent(double time_s) {
 			key.mod               = event->key.keysym.mod;
 			key.timestamp_seconds = time_s;
 
-			GameEventKeyboard(game, key);
+			GameEventKeyboard(key);
 
 			break;
 		}
@@ -965,10 +966,10 @@ struct WindowIcon {
 	}
 };
 
-static void WindowLoadPngIcon(const std::string& path, WindowIcon* icon) {
+static void WindowLoadPngIcon(const std::filesystem::path& path, WindowIcon* icon) {
 	Common::File f;
 	if (!f.Open(path, Common::File::Mode::Read)) {
-		EXIT("Can't open icon file %s\n", path.c_str());
+		EXIT("Can't open icon file %s\n", Common::PathToString(path).c_str());
 	}
 
 	int width  = 0;
@@ -994,7 +995,7 @@ void WindowContext::UpdateIcon() {
 	static bool       icon_loaded = false;
 
 	if (!icon_loaded) {
-		std::string icon_path;
+		std::filesystem::path icon_path;
 		if (Loader::SystemContentGetIconPath(&icon_path)) {
 			WindowLoadPngIcon(icon_path, &icon);
 		}
