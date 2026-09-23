@@ -965,8 +965,14 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		args.instance_count = m_num_instances;
 	}
 	if (args.base_vertex != 0 || args.first_instance != 0) {
-		LOGF("\t draw indexed offsets: base_vertex = %" PRId32 ", first_instance = %" PRIu32 "\n",
-		     args.base_vertex, args.first_instance);
+		// Demon's Souls issues ~40k such draws per second; unbounded, this line was 72 % of the
+		// guest log and a synchronous file write on the GPU thread for every draw.
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+			LOGF("\t draw indexed offsets: base_vertex = %" PRId32 ", first_instance = %" PRIu32
+			     "\n",
+			     args.base_vertex, args.first_instance);
+		}
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
 	NoteRecordedCommand();

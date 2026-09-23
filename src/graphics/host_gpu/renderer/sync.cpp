@@ -13,6 +13,7 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <atomic>
 #include <cstring>
 #include <limits>
 
@@ -102,8 +103,8 @@ void WriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer& buffer, uint32_t* 
                            uint32_t dw_offset, uint32_t dw_num) {
 	EXIT_IF(dst_gpu_addr == nullptr);
 	(void)buffer.Handle();
-	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWrite), submit_id,
-	                    dw_offset, dw_num, 0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
+	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::EopWrite), submit_id, dw_offset,
+	                    dw_num, 0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
 }
 
 void WriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer& buffer, uint64_t* dst_gpu_addr,
@@ -112,14 +113,22 @@ void WriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer& buffer, uint64_t* dst
 	                     EndOfPipeWriteSize::Qword, EndOfPipeWriteAction::Write);
 }
 
+// Titles write clock labels thousands of times per second; the log only needs the first few.
+static void LogEndOfPipeClock(uint64_t destination, uint64_t value) {
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
+		LOGF_COLOR(Log::Color::BrightGreen,
+		           "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n",
+		           destination, value);
+	}
+}
+
 void WriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer& buffer, uint64_t* dst_gpu_addr,
                                   uint64_t value) {
 	RecordEndOfPipeWrite(submit_id, buffer, reinterpret_cast<uint64_t>(dst_gpu_addr), 0,
 	                     EndOfPipeWriteSize::Qword, EndOfPipeWriteAction::Write);
 
-	LOGF_COLOR(Log::Color::BrightGreen,
-	           "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n",
-	           reinterpret_cast<uint64_t>(dst_gpu_addr), value);
+	LogEndOfPipeClock(reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 }
 
 void WriteAtEndOfPipeClockCounterWithWriteBack(uint64_t submit_id, CommandBuffer& buffer,
@@ -127,9 +136,7 @@ void WriteAtEndOfPipeClockCounterWithWriteBack(uint64_t submit_id, CommandBuffer
 	RecordEndOfPipeWrite(submit_id, buffer, reinterpret_cast<uint64_t>(dst_gpu_addr), 0,
 	                     EndOfPipeWriteSize::Qword, EndOfPipeWriteAction::WriteBack);
 
-	LOGF_COLOR(Log::Color::BrightGreen,
-	           "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n",
-	           reinterpret_cast<uint64_t>(dst_gpu_addr), value);
+	LogEndOfPipeClock(reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 }
 
 void WriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBuffer& buffer,
