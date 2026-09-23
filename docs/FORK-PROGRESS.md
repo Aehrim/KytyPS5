@@ -664,7 +664,7 @@ EOP-Clock-Zeile. Beide auf 64 Ausgaben begrenzt; Guest-Log bis in die Welt ~570 
 5 %, `operator new` 3,4 %, Seitenschutz 2,5 % – kein Einzelposten mehr über 10 %. Pro Bild ~6200 Draws à 11 µs und
 ~2700 Dispatches à 17,5 µs: allein diese Übersetzungsarbeit begrenzt auf ~9 fps. Für 30 fps müsste sie ~4× billiger
 werden – das geht nicht mehr über Einzel-Optimierungen, sondern nur über eine andere Architektur des Draw-Pfads
-(siehe Planung). Logo-Video einmal grün mit Artefakten (Lauf 109, erster Lauf nach Cache-Neuaufbau), im Folgelauf
+(Kostenmodell, verworfene Ideen und Wege: `docs/PERFORMANCE-ROADMAP.md`). Logo-Video einmal grün mit Artefakten (Lauf 109, erster Lauf nach Cache-Neuaufbau), im Folgelauf
 normal → Problem 5 (zeitabhängig), nicht durch die heutigen Änderungen.
 
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
