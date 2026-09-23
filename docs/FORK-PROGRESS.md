@@ -633,6 +633,40 @@ allem: Lesezugriffe der Spiel-Threads auf GPU-Ergebnisse (~14 %), `HandleFault` 
 Gelegentlich scheitert der Start mit „failed to reserve guest address space“ (2× heute, einmal ohne Vorgänger-
 Prozess) – einfach neu starten. Logo-Video zeigte mit verzögerten Labels einen Bildfehler (Lauf 100).
 
+**2026-09-23 – Upstream-Merge, Pipeline-Cache, und was sich *nicht* lohnt (Läufe 108–110).**
+
+*Merge* (`0fb018a`, 47 Commits bis `8b095ca`): Upstream hat den Spielstand-Fehler aus `7f3fb3e` unabhängig behoben
+(`sce_sys/blocks.bin` statt unserer `sce_kyty_blocks`). Übernommen, unsere Helfer entfernt, dazu eine einmalige
+Migration der alten Datei – sonst hätte Upstreams Code vorhandene Fork-Spielstände als `SAVE_DATA_ERROR_BROKEN`
+gemeldet. Test `TestLegacyBlockMigration` (Gegenprobe: ohne Migration schlägt er fehl); im Spiel migriert und
+„Fortsetzen“ lädt. Upstream hat außerdem die Sample-Prüfung vor die Render-Target-Beschaffung gezogen; unser
+Repeat-Draw-Pfad folgt der neuen `EmitDrawPrimitives`-Signatur.
+
+*Pipeline-Cache* (`7a9181e`): Die Datei war an die Git-Revision gebunden und bei Builds mit lokalen Änderungen ganz
+abgeschaltet – 27 der letzten 30 Testläufe liefen ohne Cache, gespeichert wurde er ein einziges Mal. Folge: Beim
+Betreten der Welt stand der GPU-Thread **24 s** (Lauf 108), davon 0,8 s Shader-Übersetzer, der Rest Treiber-
+Pipelinebau. Der Treiber schlüsselt Cache-Einträge ohnehin nach vollständigem SPIR-V und Create-Info und prüft den
+Header selbst; jetzt bindet nur noch ein Format-Tag plus Vendor/Device/Treiber/`pipelineCacheUUID` den Cache,
+Obergrenze 512 MiB. Lauf 110 (neuer Build, alter Cache): längstes Standbild beim Weltbetritt **24,4 s → 4,0 s**.
+
+*Logs* (`febbc97`): „draw indexed offsets“ lief bei jedem indizierten Draw (72 % aller Log-Zeilen), dazu jede
+EOP-Clock-Zeile. Beide auf 64 Ausgaben begrenzt; Guest-Log bis in die Welt ~570 MB → 39 MB. Keine messbare fps-Änderung.
+
+*Verworfen, weil gemessen:*
+- **Eigener Thread für Compute-Warteschlangen:** `GuestGpu::ProcessGraphicsQueue` 16,4 s, `ProcessComputeQueue`
+  2,1 s pro 20 s – die Compute-Dispatches kommen überwiegend über die Grafik-Warteschlange. Gewinn ≤ 10 %.
+- **DCC-Fill-Merker:** Aufrufstapel-Diagnose (`RtlCaptureStackBackTrace` bei jedem GPU-dirty-Übergang überwachter
+  Seiten) zeigt: Ein Compute-Shader des Spiels bindet die DCC-Metadaten als beschreibbaren Storage-Buffer und schreibt
+  sie selbst. Der Merker wurde deshalb korrekt immer verworfen; Commit entfernt. Die ~800 Rücklesungen pro 20 s
+  (~7 % Thread-Zeit) ließen sich nur durch eine GPU-seitige Clear-Erkennung vermeiden.
+
+*Profil-Stand* (Lauf 109, Sampler): Warten auf GPU (Drain) 9,4 %, Warten auf Express-Kopie 8,2 %, `vkQueueSubmit`
+5 %, `operator new` 3,4 %, Seitenschutz 2,5 % – kein Einzelposten mehr über 10 %. Pro Bild ~6200 Draws à 11 µs und
+~2700 Dispatches à 17,5 µs: allein diese Übersetzungsarbeit begrenzt auf ~9 fps. Für 30 fps müsste sie ~4× billiger
+werden – das geht nicht mehr über Einzel-Optimierungen, sondern nur über eine andere Architektur des Draw-Pfads
+(siehe Planung). Logo-Video einmal grün mit Artefakten (Lauf 109, erster Lauf nach Cache-Neuaufbau), im Folgelauf
+normal → Problem 5 (zeitabhängig), nicht durch die heutigen Änderungen.
+
 **Beobachtung:** Prozessspeicher wächst im Spiel auf > 11 GB (Lauf 20 nach 150 s). Vermutlich Texture-/Buffer-Cache
 ohne Verdrängung; für längere Sessions relevant.
 
@@ -644,7 +678,7 @@ ohne Verdrängung; für längere Sessions relevant.
 | 2 | Kein Ton ab Hauptmenü (Logo-Video hat Ton; SDL-Gerät offen; ATRAC9 dekodiert) | nicht untersucht – vermutlich anderer Ausgabepfad des Spiel-Mixers (`cp11_groupmix`) |
 | 3 | **Texturen im Charakter-Editor größtenteils schwarz** (nur einige Rüstungsteile korrekt). Sichtbare Folge der Null-Fallbacks: Material-Tabelle pc `0xfc` nullt denselben Kandidaten 25×, Indexed-Tables nullen Fremdeinträge, Texture-Cache bindet Null bei Alias-Konflikten. Nächste große Baustelle nach dem Spielstart. | beobachtet in Lauf 11 |
 | 4 | Linux: Crash im Runtime-Linker (upstream #614) | nicht relevant für uns, Windows primär |
-| 5 | **Menü-Video mal weiß, mal schwarz, mal korrekt** (Läufe 17, 19 defekt; 15, 16, 18 korrekt, teils identisches Binary); Cutscene nach dem Editor dann voller Glitches. Bink-Thread-Lebenszyklus ist in guten und schlechten Läufen identisch → das Video wird dekodiert, nur die Übernahme als Textur scheitert (Texture-Cache / Speicherüberwachung, timing-abhängig). Erst ab Lauf 15 (`--redzone`) beobachtet. | nicht untersucht |
+| 5 | **Menü-Video mal weiß, mal schwarz, mal korrekt** (Läufe 17, 19 defekt; 15, 16, 18 korrekt, teils identisches Binary); Cutscene nach dem Editor dann voller Glitches. Bink-Thread-Lebenszyklus ist in guten und schlechten Läufen identisch → das Video wird dekodiert, nur die Übernahme als Textur scheitert (Texture-Cache / Speicherüberwachung, timing-abhängig). Erst ab Lauf 15 (`--redzone`) beobachtet. Lauf 109: Logo grün mit Artefakten, Lauf 110 normal. | nicht untersucht |
 | 6 | `k16UScaled`-Texturen werden als Null gebunden (`ab1a305`); Shader-seitige Konvertierung (als `R16_UINT` sampeln, `OpConvertUToF`) fehlt | offen |
 | 7 | Depth-Feedback-Pässe laufen ohne Layout-Übergang (`541d11f`); Bildqualität dieser Pässe (Nebel, Partikel) unklar | offen |
 | 8 | Indexed-Tables mit unbeschränktem Index nutzen ein festes 32-Einträge-Budget (`2ee0ab1`); Einträge jenseits der echten Tabelle werden genullt, Indizes ≥ 32 fallen auf Kandidat 0 zurück | akzeptiert, beobachten |
