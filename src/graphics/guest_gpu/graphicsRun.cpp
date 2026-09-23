@@ -641,6 +641,7 @@ bool GuestGpu::Process(Submission& submission) {
 
 	switch (submission.type) {
 		case SubmissionType::Graphics: {
+			KYTY_PROFILER_BLOCK("GuestGpu::ProcessGraphicsQueue");
 			bool progressed = false;
 			submission.constant_complete |= submission.constant_commands.empty();
 			for (;;) {
@@ -675,6 +676,7 @@ bool GuestGpu::Process(Submission& submission) {
 			break;
 		}
 		case SubmissionType::Compute: {
+			KYTY_PROFILER_BLOCK("GuestGpu::ProcessComputeQueue");
 			const auto      num_dw = static_cast<uint32_t>(submission.commands.size());
 			const auto*     buffer = submission.commands.data();
 			static uint32_t compute_batch_log_count = 0;
