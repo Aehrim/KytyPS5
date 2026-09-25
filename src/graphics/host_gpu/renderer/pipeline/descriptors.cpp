@@ -389,7 +389,11 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 	desc.info.samples         = 1;
 	desc.info.mip_layout[0]   = {0, 0, 1, 1};
 	desc.view_info.format     = desc.info.pixel_format;
-	desc.view_info.type       = vk::ImageViewType::e2D;
+	// Null candidates of an array or cube indirect table keep the table's arrayed image type.
+	desc.view_info.type =
+	    resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2DArray
+	        ? vk::ImageViewType::e2DArray
+	        : vk::ImageViewType::e2D;
 	desc.view_info.aspect     = vk::ImageAspectFlagBits::eColor;
 	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
 	                                ? vk::ImageUsageFlagBits::eStorage

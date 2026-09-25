@@ -7,14 +7,17 @@
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -455,6 +458,192 @@ void TestInvariantIndirectImageMaterialization() {
              "wrapped scalar immediate entered the invariant image proof");
   Check(!wrapped_immediate->program.resource_tracking_complete,
         "wrapped scalar immediate entered the invariant image proof");
+}
+
+using IndirectCandidate = std::pair<Libs::Graphics::Prospero::BufferFormat,
+                                    Libs::Graphics::Prospero::ImageType>;
+
+struct IndirectTable {
+  std::array<uint32_t, 9> user_data{};
+  LinearTestMemory memory;
+  std::vector<std::array<uint32_t, 8>> descriptors;
+};
+
+// Two 224-byte material records probed every 32 bytes from offset 4. Offsets 4
+// and 228 are the record fields; the other probes only exist because the
+// selector product may wrap. Key N selects heap entry N, a distinct 4x4 image.
+IndirectTable
+MakeIndirectTable(std::span<const IndirectCandidate> candidates,
+                  std::span<const std::pair<uint32_t, uint32_t>> keys) {
+  IndirectTable table;
+  const auto heap_records = static_cast<uint32_t>(candidates.size()) * 2u;
+  table.user_data = {0x1000u,    224u << 16u,  2u, 0u, 0x2000u,
+                     16u << 16u, heap_records, 0u, 7u};
+  for (const auto &[offset, key] : keys) {
+    table.memory.words[(0x1000u - table.memory.base + offset) / 4u] = key;
+  }
+  for (uint32_t index = 0; index < candidates.size(); index++) {
+    std::array<uint32_t, 8> descriptor{};
+    descriptor[0] = 0x20u * (index + 1u);
+    descriptor[1] = static_cast<uint32_t>(candidates[index].first) << 20u;
+    descriptor[2] = 3u | (3u << 14u);
+    descriptor[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+                    (static_cast<uint32_t>(candidates[index].second) << 28u);
+    std::ranges::copy(descriptor, table.memory.words.begin() +
+                                      (0x2000u - table.memory.base) / 4u +
+                                      index * 8u);
+    table.descriptors.push_back(descriptor);
+  }
+  return table;
+}
+
+void TestHeterogeneousIndirectImageCandidates() {
+  using Libs::Graphics::Prospero::BufferFormat;
+  using Libs::Graphics::Prospero::ImageType;
+  using Libs::Graphics::Prospero::TextureNumericClass;
+  constexpr auto Float2D =
+      IndirectCandidate{BufferFormat::k32_32_32_32Float, ImageType::kColor2D};
+  constexpr auto Uint2D =
+      IndirectCandidate{BufferFormat::k32UInt, ImageType::kColor2D};
+  constexpr auto FloatCube =
+      IndirectCandidate{BufferFormat::k32_32_32_32Float, ImageType::kCube};
+  constexpr auto Float3D =
+      IndirectCandidate{BufferFormat::k32_32_32_32Float, ImageType::kColor3D};
+  constexpr auto Fmask =
+      IndirectCandidate{BufferFormat::kFmask8_S2_F1, ImageType::kColor2D};
+  constexpr auto Unsampled =
+      IndirectCandidate{BufferFormat::k8SNorm, ImageType::kColor2D};
+
+  struct Case {
+    const char *name;
+    std::vector<IndirectCandidate> candidates;
+    std::vector<std::pair<uint32_t, uint32_t>> keys;
+    TextureNumericClass numeric_class;
+    Decoder::ImageDimension dimension;
+    bool cube;
+    std::vector<bool> kept;
+  };
+  const Case cases[] = {
+      // Record field and wrapped probes reach integer, cube, FMASK and
+      // unsampled descriptors next to the float 2D textures this sample uses.
+      {"mixed",
+       {Float2D, Float2D, Uint2D, FloatCube, Fmask, Unsampled},
+       {{36u, 1u}, {68u, 2u}, {100u, 3u}, {132u, 4u}, {164u, 5u}},
+       TextureNumericClass::Float,
+       Decoder::ImageDimension::Dim2D,
+       false,
+       {true, true, false, false, false, false}},
+      // The instruction dimension outranks the cube majority; the integer
+      // fallback descriptor is only reached through wrapped probes.
+      {"instruction dimension",
+       {Uint2D, FloatCube, FloatCube, FloatCube, Float2D},
+       {{4u, 4u}, {228u, 4u}, {36u, 1u}, {68u, 2u}, {100u, 3u}},
+       TextureNumericClass::Float,
+       Decoder::ImageDimension::Dim2D,
+       false,
+       {false, false, false, false, true}},
+      // Record fields tie; the class with more descriptors wins over float.
+      {"descriptor count",
+       {Uint2D, Float2D, Uint2D, Uint2D, Float2D},
+       {{4u, 1u}, {228u, 2u}, {36u, 3u}, {68u, 4u}},
+       TextureNumericClass::Uint,
+       Decoder::ImageDimension::Dim2D,
+       false,
+       {true, false, true, true, false}},
+      // Both record fields name one descriptor each; float breaks the tie.
+      {"float tie",
+       {Uint2D, Float2D},
+       {{228u, 1u}},
+       TextureNumericClass::Float,
+       Decoder::ImageDimension::Dim2D,
+       false,
+       {false, true}},
+      // Descriptors named by the record field outrank wrapped-probe noise.
+      {"record field",
+       {Float2D, Uint2D, Uint2D, Float2D, Float2D, Float2D},
+       {{4u, 1u}, {228u, 2u}, {36u, 3u}, {68u, 4u}, {100u, 5u}},
+       TextureNumericClass::Uint,
+       Decoder::ImageDimension::Dim2D,
+       false,
+       {false, true, true, false, false, false}},
+      // Without a candidate of the instruction dimension the majority keeps
+      // the descriptor-derived class, as a direct binding would.
+      {"descriptor majority",
+       {FloatCube, Float3D, FloatCube},
+       {{36u, 1u}, {68u, 2u}},
+       TextureNumericClass::Float,
+       Decoder::ImageDimension::Dim2DArray,
+       true,
+       {true, false, true}},
+      // A table with no specializable descriptor binds only null images.
+      {"no typed candidate",
+       {Fmask, Unsampled},
+       {{36u, 1u}},
+       TextureNumericClass::Float,
+       Decoder::ImageDimension::Dim2D,
+       false,
+       {false, false}},
+  };
+
+  for (const auto &test : cases) {
+    const auto fail = [&](const char *reason) {
+      throw std::runtime_error(std::string(test.name) + ": " + reason);
+    };
+    auto fixture = MakeIndirectImageFixture(false);
+    fixture->PlanAndTrack();
+    const auto resource_plan = ExtractResourcePlan(fixture->program);
+    EliminateDeadCode(fixture->program.blocks);
+    auto table = MakeIndirectTable(test.candidates, test.keys);
+    const SrtRuntime runtime{.user_data = table.user_data,
+                             .userdata = &table.memory,
+                             .read_specialization_memory =
+                                 ReadLinearTestMemory};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    if (!MaterializeResources(resource_plan, runtime, snapshot,
+                              specialization)) {
+      fail("heterogeneous indirect table was rejected");
+    }
+    const auto count = test.candidates.size();
+    if (snapshot.images.size() != count ||
+        specialization.images.size() != count) {
+      fail("heterogeneous indirect table changed its candidate topology");
+    }
+    for (const auto &image : specialization.images) {
+      if (image.numeric_class != test.numeric_class ||
+          image.dimension != test.dimension || image.cube != test.cube ||
+          image.indirect_root != 0u) {
+        fail("indirect candidates did not share the selected class");
+      }
+    }
+    // Key N names heap entry N; follow the runtime key mapping to its
+    // candidate.
+    const auto mapping = specialization.images[0].indirect_mapping_offset;
+    if (snapshot.flattened_srt[mapping] != count) {
+      fail("nulled indirect candidates lost their key mapping");
+    }
+    for (uint32_t entry = 0; entry < count; entry++) {
+      const auto key = snapshot.flattened_srt[mapping + 1u + entry * 2u];
+      const auto candidate = snapshot.flattened_srt[mapping + 2u + entry * 2u];
+      if (key != entry || candidate >= count) {
+        fail("indirect key mapping is malformed");
+      }
+      const auto &dwords = snapshot.images[candidate].dwords;
+      const bool kept =
+          std::equal(table.descriptors[key].begin(),
+                     table.descriptors[key].end(), dwords.begin());
+      const bool null = std::ranges::all_of(
+          dwords, [](uint32_t dword) { return dword == 0u; });
+      if (test.kept[key] ? !kept : !null) {
+        fail("indirect candidate was not kept or nulled as expected");
+      }
+    }
+    ApplyResourceSpecialization(fixture->program, specialization);
+    if (fixture->program.info.images.size() != count ||
+        fixture->program.info.images[0].indirect_resources.size() != count) {
+      fail("heterogeneous indirect specialization was not applied");
+    }
+  }
 }
 
 void TestComputeBufferFill() {
@@ -2012,6 +2201,8 @@ int main() {
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
     Run("dynamic storage mips", TestDynamicStorageMipTracking);
     Run("invariant indirect images", TestInvariantIndirectImageMaterialization);
+    Run("heterogeneous indirect images",
+        TestHeterogeneousIndirectImageCandidates);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("phi validation", TestPhiValidation);
